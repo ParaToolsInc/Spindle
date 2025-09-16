@@ -316,7 +316,7 @@ origin_dir/liboriginlib.so: originlib.c $(REGLIB_SRC) origin_dir/origin_subdir/l
 	$(AM_V_CCLD)$(MPICC) -o $@ -fPIC -Wall $< $(REGLIB_SRC) -DSO_NAME=liboriginlib.so -DFUNC_NAME=origin_calc -shared '-Wl,-rpath,$$ORIGIN/origin_subdir' -Lorigin_dir/origin_subdir -lorigintarget
 
 libsymbind_a.so: $(srcdir)/symbindlib.c $(srcdir)/symbind_fileops.c libsymbind_b.so
-	$(AM_V_CCLD)$(CC) $(CFLAGS) -o $@ -shared -fPIC -Wall -DAUTORUN=a $(srcdir)/symbindlib.c -L. -lsymbind_b -I$(srcdir) -Wl,-rpath,$(top_builddir)/testsuite
+	$(AM_V_CCLD)$(CC) $(CFLAGS) -o $@ -shared -fPIC -Wall -DAUTORUN=a $(srcdir)/symbindlib.c -L. -Wl,--no-as-needed -lsymbind_b -I$(srcdir) -Wl,-rpath,$(top_builddir)/testsuite
 
 libsymbind_b.so: $(srcdir)/symbindlib.c $(srcdir)/symbind_fileops.c
 	$(AM_V_CCLD)$(CC) $(CFLAGS) -o $@ -shared -fPIC -Wall -DAUTORUN=b $(srcdir)/symbindlib.c -I$(srcdir) -Wl,-rpath,$(top_builddir)/testsuite
@@ -334,11 +334,11 @@ libsymbind_f.so: $(srcdir)/symbindlib.c $(srcdir)/symbind_fileops.c
 	$(AM_V_CCLD)$(CC) $(CFLAGS) -fno-plt -o $@ -shared -fPIC -Wall $(srcdir)/symbindlib.c -I$(srcdir) -Wl,-rpath,$(top_builddir)/testsuite
 
 libsymbind_g.so: $(srcdir)/symbindlib_g.c
-	$(AM_V_CC)$(CC) $(CFLAGS) -c -o symbindlib_g.o -shared -fPIC -Wall $(srcdir)/symbindlib_g.c -I$(srcdir)
+	$(AM_V_CC)$(CC) $(CFLAGS) -c -o symbindlib_g.o -shared -fPIC -fno-stack-protector -Wall $(srcdir)/symbindlib_g.c -I$(srcdir)
 	$(AM_V_CCLD)$(LD) -shared -o $@ symbindlib_g.o -rpath $(top_builddir)/testsuite
 
 symbind_test: $(srcdir)/symbind_test.c $(srcdir)/symbind_fileops.c libsymbind_a.so libsymbind_b.so libsymbind_c.so libsymbind_d.so libsymbind_e.so libsymbind_f.so libsymbind_g.so
-	$(AM_V_CCLD)$(CC) $(CFLAGS) -o $@ -Wall $(srcdir)/symbind_test.c -L. -lsymbind_a -I$(srcdir) -ldl -Wl,-rpath,$(top_builddir)/testsuite
+	$(AM_V_CCLD)$(CC) $(CFLAGS) -o $@ -Wall $(srcdir)/symbind_test.c -L. -Wl,--no-as-needed -lsymbind_a -I$(srcdir) -ldl -Wl,-rpath,$(top_builddir)/testsuite
 
 retzero_rx: retzero.c
 	$(AM_V_CCLD)$(MPICC) -o $@ $<

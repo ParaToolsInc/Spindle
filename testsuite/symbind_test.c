@@ -32,6 +32,7 @@ const char *unknown_dso = "[unknown dso]";
 
 typedef struct {
    const char *symname;
+   const char *altname;
    const char *libtarget;
    const char *libmatched;
    void *got_ptr;
@@ -160,7 +161,7 @@ static int check_relocations(REL_TYPE *rels, unsigned long num_rels, ElfW(Addr) 
       for (test_i = 0; test[test_i].symname; test_i++) {
          if (strcmp(name, "dlopen") == 0)
             continue;
-         if (strstr(name, test[test_i].symname)) {
+         if (strstr(name, test[test_i].symname) || (test[test_i].altname && strstr(name, test[test_i].altname))) {
             break;
          }
       }
@@ -299,13 +300,13 @@ void *runtest_for_lib(const char *libname, int options)
       libspindle = "libc.so";
 
    test_bindings_t test[] = {
-      { "getpid", "libc.so", NULL, NULL, 0 },
-      { "readlink", libspindle, NULL, NULL, 0 },
-      { "open", libspindle, NULL, NULL, 0 },
-      { "read", "libc.so", NULL, NULL, 0 },
-      { "fxstat", libspindle, NULL, NULL, 0 },
-      { "lxstat", libspindle, NULL, NULL, 0 },      
-      { "xstat", libspindle, NULL, NULL, 0 },
+      { "getpid", NULL, "libc.so", NULL, NULL, 0 },
+      { "readlink", NULL, libspindle, NULL, NULL, 0 },
+      { "open", NULL, libspindle, NULL, NULL, 0 },
+      { "read", NULL, "libc.so", NULL, NULL, 0 },
+      { "fxstat", "fstat", libspindle, NULL, NULL, 0 },
+      { "lxstat", "lstat", libspindle, NULL, NULL, 0 },
+      { "xstat", "stat", libspindle, NULL, NULL, 0 },
       { NULL, NULL, NULL, NULL, 0 }
    };
 
