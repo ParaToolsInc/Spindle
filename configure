@@ -16958,7 +16958,7 @@ $as_echo "yes" >&6; }
 $as_echo "$as_me: WARNING: Slurm launching was explicitly requested, but slurm $srun_version, which is later than $bad_srun_major.$bad_srun_minor, was detected.  This version of slurm breaks spindle daemon launch.  You might still be able to get spindle to work by running jobs with srun's --overlap option.  Or you could switch to having spindle launch daemons with rsh/ssh by passing the --with-rsh-launch option, and ensuring that rsh/ssh to nodes works on your cluster." >&2;}
   fi
 
-  if [ "x$ENABLE_RSH_LAUNCH" != "x1" ] && [ "x$ENABLE_SLURM_LAUNCH" != "x1" ] ; then
+  if [ "x$ENABLE_RSH_LAUNCH" != "x1" ] && [ "x$ENABLE_SLURM_LAUNCH" != "x1" ] && [ "x$ENABLE_SLURM_PLUGIN" != "xtrue" ] ; then
     if test "x$BROKEN_SRUN" == "x1"; then
       as_fn_error $? "Slurm support was requested, but slurm $srun_version, which is later than $bad_srun_major.$bad_srun_minor, was detected.  This version of slurm breaks spindle daemon launch.  You can disable this error message and build spindle with slurm-based daemon launching anyways by explicitly passing the --with-slurm-launch option (you might still be able to get spindle to work by running jobs with srun's --overlap option).  Or you could switch to having spindle launch daemons with rsh/ssh by passing the --with-rsh-launch option, and ensuring that rsh/ssh to nodes works on your cluster." "$LINENO" 5
     else
@@ -18826,6 +18826,14 @@ SCONTROL_ABSPATH=$SCONTROL_ABSPATH
 SINFO_ABSPATH=$SINFO_ABSPATH
 
 
+ if test "x$ENABLE_FLUX_PLUGIN" = "xtrue"; then
+  BLD_FLUXPLUGIN_TRUE=
+  BLD_FLUXPLUGIN_FALSE='#'
+else
+  BLD_FLUXPLUGIN_TRUE='#'
+  BLD_FLUXPLUGIN_FALSE=
+fi
+
 
 cat >confcache <<\_ACEOF
 # This file is a shell script that caches the results of configure
@@ -19038,6 +19046,10 @@ Usually this means the macro was only invoked conditionally." "$LINENO" 5
 fi
 if test -z "${BLD_SLURMPLUGIN_TRUE}" && test -z "${BLD_SLURMPLUGIN_FALSE}"; then
   as_fn_error $? "conditional \"BLD_SLURMPLUGIN\" was never defined.
+Usually this means the macro was only invoked conditionally." "$LINENO" 5
+fi
+if test -z "${BLD_FLUXPLUGIN_TRUE}" && test -z "${BLD_FLUXPLUGIN_FALSE}"; then
+  as_fn_error $? "conditional \"BLD_FLUXPLUGIN\" was never defined.
 Usually this means the macro was only invoked conditionally." "$LINENO" 5
 fi
 
