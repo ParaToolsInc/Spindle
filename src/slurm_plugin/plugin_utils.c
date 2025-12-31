@@ -261,14 +261,14 @@ char *unique_file = NULL;
 
 #define UNIQUE_FILE_NAME "spindle_unique"
 
-int isBEProc(spindle_args_t *params)
+int isBEProc(spindle_args_t *params, unsigned int exit_phase)
 {
-   char *dir = NULL, *expanded_dir = NULL, *realized_dir = NULL;
+   char *dir = NULL, *expanded_dir = NULL, *realized_dir = NULL, *phase_name = NULL;
    char hostname[256], session_id_str[32];
    size_t unique_file_len;
    int beproc_result = -1;
    int fd = -1, error;
-
+   
    dir = params->location;
    if (!dir) {
       sdprintf(1, "ERROR: Location not filled in\n");
@@ -289,13 +289,16 @@ int isBEProc(spindle_args_t *params)
 
    snprintf(session_id_str, sizeof(session_id_str), "%lu", (unsigned long) params->number);
 
+   phase_name = exit_phase ? "exit" : "launch";
+
    unique_file_len = strlen(realized_dir) + 1 +
       strlen(UNIQUE_FILE_NAME) + 1 +
+      strlen(phase_name) + 1 +
       strlen(hostname) + 1 +
       strlen(session_id_str) + 1;
 
    unique_file = (char *) malloc(sizeof(char*) * unique_file_len);
-   snprintf(unique_file, unique_file_len, "%s/%s.%s.%s", realized_dir, UNIQUE_FILE_NAME, hostname, session_id_str);
+   snprintf(unique_file, unique_file_len, "%s/%s.%s.%s.%s", realized_dir, UNIQUE_FILE_NAME, phase_name, hostname, session_id_str);
 
    spindle_mkdir(realized_dir);
 

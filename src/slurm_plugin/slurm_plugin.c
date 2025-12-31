@@ -36,7 +36,9 @@ SPINDLE_EXPORT extern const char plugin_type[];
 SPINDLE_EXPORT extern const unsigned int plugin_version;
 SPINDLE_EXPORT extern struct spank_option spank_options[];
 SPINDLE_EXPORT int slurm_spank_task_init(spank_t spank, int ac, char *argv[]);
+SPINDLE_EXPORT int slurm_spank_task_exit(spank_t spank, int ac, char *argv[]);
 SPINDLE_EXPORT int slurm_spank_exit(spank_t spank, int site_argc, char *site_argv[]);
+
 
 SPANK_PLUGIN(spindle, 1)
 
@@ -84,8 +86,8 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
    int result, func_result = -1;
    saved_env_t *env = NULL;
    static int initialized = 0;
-   spindle_args_t params;
-   
+   spindle_args_t params = {0};
+
    if (!enable_spindle)
       return 0;
 
@@ -136,7 +138,7 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
    return func_result;
 }
 
-int slurm_spank_exit(spank_t spank, int site_argc, char *site_argv[])
+int slurm_spank_task_exit(spank_t spank, int site_argc, char *site_argv[])
 {
    spank_context_t context;
    char *result_str;
@@ -226,7 +228,7 @@ static int fillInArgs(spank_t spank, spindle_args_t *args, int argc, char **argv
    char *err_string;
 
    args->unique_id = unique_id;
-   args->number = (unsigned long) args->unique_id;
+   args->number = (number_t) args->unique_id;
    result = fillInSpindleArgsCmdlineFE(args, SPINDLE_FILLARGS_NOUNIQUEID | SPINDLE_FILLARGS_NONUMBER,
                                        argc, argv, &err_string);
    if (result == -1) {
@@ -238,6 +240,8 @@ static int fillInArgs(spank_t spank, spindle_args_t *args, int argc, char **argv
       return -1;
    }
    args->opts |= OPT_BEEXIT;
+   args->use_launcher = slurm_plugin_launcher;
+   args->startup_type = startup_external;
 
    oldlocation = args->location;
    current_spank = spank;
@@ -444,7 +448,7 @@ static int launch_spindle(spank_t spank, spindle_args_t *params)
    if (!hostlist)
       goto done;
    
-   is_be_leader = isBEProc(params);
+   is_be_leader = isBEProc(params, 0);
    if (is_be_leader == -1)
       goto done;
    
@@ -516,7 +520,7 @@ static int launchFE(char **hostlist, spindle_args_t *params)
 
    superclose();
    
-   sdprintf(1, "Initializing FE on pid %d with unqiue_id %lu\n", (int) getpid(), params->unique_id);
+   sdprintf(1, "Initializing FE on pid %d with unique_id %lu\n", (int) getpid(), params->unique_id);
    result = spindleInitFE((const char **) hostlist, params);
    if (result == -1) {
       sdprintf(1, "ERROR: Could not launch FE.  Spindle will likely hang.\n");
@@ -597,7 +601,7 @@ static int prepApp(spank_t spank, spindle_args_t *params)
    }
       
 #if HAVE_DECL_SPANK_PREPEND_TASK_ARGV == 1
-   sdprintf(2, "Prepping task process %d to run spindle\n", getpid());
+   sdprintf(2, "Prepping task process %d to run spindle using spank_prepend_task_argv method\n", getpid());
 
    const char **filter_argv = (const char **)bootstrap_argv;
    err = spank_prepend_task_argv(spank, bootstrap_argc, filter_argv);
@@ -606,7 +610,7 @@ static int prepApp(spank_t spank, spindle_args_t *params)
       result = -1;
    }
 #else
-   sdprintf(2, "Prepping app process %d to run spindle\n", getpid());
+   sdprintf(2, "Prepping app process %d to run spindle using spindleHookSpindleArgsIntoExecBE method\n", getpid());
 
    err = spank_get_item(spank, S_JOB_ARGV, &app_argc, &app_argv);
    if (err != ESPANK_SUCCESS) {
@@ -633,9 +637,9 @@ static int handleExit(void *params, char **output_str)
 {
    exit_params_t *exit_params;
    spank_t spank;
-   int site_argc, result;
+   int site_argc, result, is_be_leader;
    char **site_argv;
-   spindle_args_t args;
+   spindle_args_t args = {0};
 
    exit_params = (exit_params_t *) params;
    spank = exit_params->spank;
@@ -650,13 +654,18 @@ static int handleExit(void *params, char **output_str)
    }
 
    if (!args.location) {
-       sdprintf(2, "WARNING: spindleExitBE not called since location is NULL\n");
+      sdprintf(2, "WARNING: spindleExitBE not called since location is NULL\n");
    } else {
-       result = spindleExitBE(args.location);
-       if (result == -1) {
-	   sdprintf(1, "ERROR: spindleExitBE returned an error on location %s\n", args.location);
-	   return -1;
-       }
+      // The task_exit callback is run for _each proc_, so we use
+      // isBEProc to pick only one proc per node to call spindleExitBE.
+      is_be_leader = isBEProc(&args, 1);
+      if (is_be_leader) {
+         result = spindleExitBE(args.location);
+         if (result == -1) {
+             sdprintf(1, "ERROR: spindleExitBE returned an error on location %s\n", args.location);
+             return -1;
+         }
+      }
    }
    return 0;
 }
