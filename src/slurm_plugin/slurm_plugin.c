@@ -116,6 +116,10 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
       goto done;
    }
 
+   if (params.opts & OPT_OFF) {
+     return 0;
+   }
+
    result = launch_spindle(spank, &params);
    if (result == -1) {
       sdprintf(1, "Error launching spindle.  Aborting spindle\n");
@@ -651,6 +655,10 @@ static int handleExit(void *params, char **output_str)
    if (result == -1) {
       sdprintf(1, "ERROR: Could not process spindle args in handleExit\n");
       return -1;
+   }
+   
+   if (args.opts & OPT_OFF) {
+      return 0;
    }
 
    if (!args.location) {
