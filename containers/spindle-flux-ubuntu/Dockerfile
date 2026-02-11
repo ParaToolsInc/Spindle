@@ -63,5 +63,8 @@ ENV RDMAV_FORK_SAFE 1
 # on GitHub-hosted runners.
 ENV HWLOC_HIDE_ERRORS 2
 
+RUN sudo mkdir -p /shared && \
+    sudo chown -R ${USER}:${USER} /shared
+
 ENTRYPOINT /bin/bash ./entrypoint.sh
 

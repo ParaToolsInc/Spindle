@@ -31,6 +31,7 @@ if [ ${thisHost} != "${mainHost}" ]; then
     FLUX_FAKE_HOSTNAME=$thisHost flux start -o --config /etc/flux/config ${brokerOptions} sleep inf
 else
     # Head node
+    echo "$thisHost is the head node, launching with FLUX_FAKE_HOSTNAME=$FLUX_FAKE_HOSTNAME"
     FLUX_FAKE_HOSTNAME=$thisHost flux start -o --config /etc/flux/config ${brokerOptions} sleep inf
 fi
 
