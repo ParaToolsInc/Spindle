@@ -489,6 +489,7 @@ int init_session(spindle_args_t *args, const ConfigMap &config, Launcher *launch
          }
          finish_session_startup(false);
       }
+      debug_printf("Done starting new spindle session\n");
       return 0;
    }
 

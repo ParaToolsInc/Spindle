@@ -37,8 +37,14 @@ SPINDLE_EXPORT extern const unsigned int plugin_version;
 SPINDLE_EXPORT extern struct spank_option spank_options[];
 SPINDLE_EXPORT int slurm_spank_task_init(spank_t spank, int ac, char *argv[]);
 SPINDLE_EXPORT int slurm_spank_task_exit(spank_t spank, int ac, char *argv[]);
+SPINDLE_EXPORT int slurm_spank_init(spank_t spank, int ac, char *argv[]);
+SPINDLE_EXPORT int slurm_spank_init_post_opt(spank_t spank, int ac, char *argv[]);
+SPINDLE_EXPORT int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[]);
 SPINDLE_EXPORT int slurm_spank_exit(spank_t spank, int site_argc, char *site_argv[]);
 
+
+SPINDLE_EXPORT int slurm_spank_job_prolog(spank_t spank, int ac, char *argv[]);
+SPINDLE_EXPORT int slurm_spank_job_epilog(spank_t spank, int ac, char *argv[]);
 
 SPANK_PLUGIN(spindle, 1)
 
@@ -59,6 +65,7 @@ static int prepApp(spank_t spank, spindle_args_t *params);
 static int launch_spindle(spank_t spank, spindle_args_t *params);
 static unique_id_t getUniqueID(spank_t spank);
 static int spindle_options(int val, const char *optarg, int remote);
+static int spindle_session_options(int val, const char *optarg, int remote);
 static int process_spindle_args(spank_t spank, int site_argc, char *site_argv[], spindle_args_t *params, int *out_argc, char ***out_argv);
 static int handleExit(void *params, char **output_str);
    
@@ -67,6 +74,8 @@ static pid_t pidFE = 0;
 static __thread spank_t current_spank;
 static const char *user_options = NULL;
 static int enable_spindle = 0;
+static int start_session = 0;
+static const char *session_id = NULL;
 
 extern char **environ;
 extern char *parse_location(char *loc, number_t number);
@@ -80,6 +89,103 @@ struct spank_option spank_options[] =
    SPANK_OPTIONS_TABLE_END
 };
 
+struct spank_option session_option =
+{
+   "spindle-session", NULL, 
+   "Start a Spindle session for this allocation", 0, 0,
+   (spank_opt_cb_f) spindle_session_options
+};
+
+const char * contextToStr(spank_context_t ctx) {
+   switch(ctx) {
+      case S_CTX_ERROR:      return "S_CTX_ERROR";
+      case S_CTX_LOCAL:      return "S_CTX_LOCAL";
+      case S_CTX_REMOTE:     return "S_CTX_REMOTE";
+      case S_CTX_ALLOCATOR:  return "S_CTX_ALLOCATOR";
+      case S_CTX_SLURMD:     return "S_CTX_SLURMD";
+      case S_CTX_JOB_SCRIPT: return "S_CTX_JOB_SCRIPT";
+   }
+   return "<UNKNOWN CONTEXT>";
+}
+
+
+int slurm_spank_init(spank_t spank, int ac, char *argv[]) {
+   spank_context_t context;
+   context = spank_context();
+   const char * ctxName = contextToStr(context);
+   slurm_spank_log("slurm_spank_init in ctx %s", ctxName);
+   if (context == S_CTX_ALLOCATOR) {
+      slurm_spank_log("registering session_option, start_session = %d", start_session);
+      spank_option_register(spank, &session_option);
+      slurm_spank_log("back from session_option, start_session = %d", start_session);
+      if (start_session) {
+         session_id = "abcdefgh";
+         slurm_spank_log("using session id %s\n", session_id);
+         setenv("SPANK_SPINDLE_SESSION", session_id, 1);
+      }
+   }
+   return 0;
+}
+
+int slurm_spank_init_post_opt(spank_t spank, int ac, char *argv[]) {
+   spank_context_t context;
+   context = spank_context();
+   const char * ctxName = contextToStr(context);
+   slurm_spank_log("slurm_spank_init_post_opt in ctx %s", ctxName);
+   if (context == S_CTX_ALLOCATOR) {
+      if (start_session) {
+         session_id = "abcdefgh";
+         slurm_spank_log("using session id %s", session_id);
+         setenv("SPANK_SPINDLE_SESSION", session_id, 1);
+      }
+   }
+   return 0;
+}
+
+int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[]) {
+   spank_context_t context;
+   context = spank_context();
+   const char * ctxName = contextToStr(context);
+   slurm_spank_log("slurm_spank_local_user_init in ctx %s", ctxName);
+   session_id = getenv("SPANK_SPINDLE_SESSION");
+   if (session_id) {
+      slurm_spank_log("session_id = %s", session_id);
+      spank_job_control_setenv(spank, "SPINDLE_SESSION", session_id, 1);
+   }
+   return 0;
+}
+
+int slurm_spank_job_prolog(spank_t spank, int ac, char *argv[]) {
+   spank_context_t context;
+   context = spank_context();
+   const char * ctxName = contextToStr(context);
+   session_id = getenv("SPANK_SPINDLE_SESSION");
+   slurm_spank_log("slurm_spank_job_prolog in ctx %s, session_id = %s", ctxName, session_id);
+   return 0;
+}
+
+int slurm_spank_job_epilog(spank_t spank, int ac, char *argv[]) {
+   spank_context_t context;
+   context = spank_context();
+   const char * ctxName = contextToStr(context);
+   slurm_spank_log("slurm_spank_job_epilog in ctx %s", ctxName);
+   return 0;
+}
+
+int slurm_spank_exit(spank_t spank, int ac, char *argv[]) {
+   spank_context_t context;
+   context = spank_context();
+   const char * ctxName = contextToStr(context);
+   slurm_spank_log("slurm_spank_exit in ctx %s", ctxName);
+   if (context == S_CTX_ALLOCATOR) {
+       if (start_session) {
+           slurm_spank_log("should stop session %s", session_id);
+       }
+   }
+   return 0;
+}
+
+
 int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
 {
    spank_context_t context;
@@ -88,6 +194,9 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
    static int initialized = 0;
    spindle_args_t params = {0};
 
+   context = spank_context();
+   const char * ctxName = contextToStr(context);
+   slurm_spank_log("slurm_spank_task_init in context %s", ctxName);
    if (!enable_spindle)
       return 0;
 
@@ -95,7 +204,6 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
       return 0; //No spindle calls as root
    }   
 
-   context = spank_context();
    if (context == S_CTX_ERROR) {
       slurm_error("ERROR: spank_context returned an error in spindle task_init plugin.\n");
       return -1;
@@ -109,6 +217,11 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
    
    push_env(spank, &env);
    sdprintf(1, "Beginning spindle plugin\n");
+
+   session_id = getenv("SPANK_SPINDLE_SESSION");
+   if(session_id) {
+      slurm_spank_log("this job uses a session, session_id = %s", session_id);
+   }
    
    result = process_spindle_args(spank, site_argc, site_argv, &params, NULL, NULL);
    if (result == -1) {
@@ -152,11 +265,13 @@ int slurm_spank_task_exit(spank_t spank, int site_argc, char *site_argv[])
    saved_env_t *saved_env;
    exit_params_t exit_params;
 
+   context = spank_context();
+   const char * ctxName = contextToStr(context);
+   slurm_spank_log("slurm_spank_task_exit in context %s", ctxName);
    if (!enable_spindle) {
       return 0;
    }
 
-   context = spank_context();
    if (context == S_CTX_ERROR) {
       slurm_error("ERROR: spank_context returned an error in spindle exit plugin.\n"); 
       return -1;
@@ -344,7 +459,9 @@ static char **get_hostlist(spank_t spank, unsigned int num_hosts)
 {
    char *short_hosts, **hostlist;;
 
-   short_hosts = readSpankEnv(spank, "SLURM_JOB_NODELIST");
+   short_hosts = readSpankEnv(spank, "SLURM_STEP_NODELIST");
+   if (!short_hosts)
+      short_hosts = readSpankEnv(spank, "SLURM_JOB_NODELIST");
    if (!short_hosts)
       short_hosts = readSpankEnv(spank, "SLURM_NODELIST");
    if (!short_hosts) {
@@ -500,6 +617,14 @@ static int spindle_options(int val, const char *optarg, int remote)
 {
    enable_spindle = 1;
    user_options = optarg;
+   
+   return 0;
+}
+
+static int spindle_session_options(int val, const char *optarg, int remote)
+{
+   start_session = 1;
+   slurm_spank_log("will start session, start_session = %d", start_session);
    
    return 0;
 }
