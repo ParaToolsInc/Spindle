@@ -17,6 +17,8 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <sys/un.h>
+#include <sys/socket.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
@@ -31,16 +33,34 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 
 #include "config.h"
 
+#define SPINDLE_USE_SESSION "SPINDLE_USE_SESSION"
+#define SPANK_SPINDLE_USE_SESSION "SPANK_" SPINDLE_USE_SESSION
+
 SPINDLE_EXPORT extern const char plugin_name[];
 SPINDLE_EXPORT extern const char plugin_type[];
 SPINDLE_EXPORT extern const unsigned int plugin_version;
 SPINDLE_EXPORT extern struct spank_option spank_options[];
 SPINDLE_EXPORT int slurm_spank_task_init(spank_t spank, int ac, char *argv[]);
 SPINDLE_EXPORT int slurm_spank_task_exit(spank_t spank, int ac, char *argv[]);
+SPINDLE_EXPORT int slurm_spank_init(spank_t spank, int ac, char *argv[]);
+SPINDLE_EXPORT int slurm_spank_init_post_opt(spank_t spank, int ac, char *argv[]);
+SPINDLE_EXPORT int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[]);
 SPINDLE_EXPORT int slurm_spank_exit(spank_t spank, int site_argc, char *site_argv[]);
 
 
+SPINDLE_EXPORT int slurm_spank_job_prolog(spank_t spank, int ac, char *argv[]);
+SPINDLE_EXPORT int slurm_spank_job_epilog(spank_t spank, int ac, char *argv[]);
+
+/* Fail the job, not the node, if the plugin fails. */
+SPINDLE_EXPORT int slurm_spank_init_failure_mode = ESPANK_JOB_FAILURE;
+
 SPANK_PLUGIN(spindle, 1)
+
+typedef struct {
+   spank_t spank;
+   int site_argc;
+   char **site_argv;
+} start_params_t;
 
 typedef struct {
    spank_t spank;
@@ -53,20 +73,29 @@ static int set_spindle_args(spank_t spank, spindle_args_t *params, int argc, cha
 static int get_spindle_args(spank_t spank, spindle_args_t *params);
 #endif
 
+static int should_use_session(spank_t spank);
+static int forward_environment(spank_t spank);
+static int handle_forwarded_environment(void);
 static int launchFE(char **hostlist, spindle_args_t *params);
 static int launchBE(spank_t spank, spindle_args_t *params);
 static int prepApp(spank_t spank, spindle_args_t *params);
 static int launch_spindle(spank_t spank, spindle_args_t *params);
-static unique_id_t getUniqueID(spank_t spank);
+static unique_id_t getUniqueID(spank_t spank, int session_enabled);
 static int spindle_options(int val, const char *optarg, int remote);
-static int process_spindle_args(spank_t spank, int site_argc, char *site_argv[], spindle_args_t *params, int *out_argc, char ***out_argv);
+static int spindle_session_options(int val, const char *optarg, int remote);
+static int fillInArgs(spank_t spank, spindle_args_t *args, int argc, char **argv, unique_id_t unique_id, int session_enabled);
+static int process_spindle_args(spank_t spank, int site_argc, char *site_argv[], spindle_args_t *params, int *out_argc, char ***out_argv, int session_enabled);
 static int handleExit(void *params, char **output_str);
+static int handleStart(void *params, char **output_str);
+static int get_num_hosts(spank_t spank);
+static char **get_hostlist(spank_t spank, unsigned int num_hosts);
    
 static pid_t pidBE = 0;
 static pid_t pidFE = 0;
 static __thread spank_t current_spank;
 static const char *user_options = NULL;
 static int enable_spindle = 0;
+static int start_session = 0;
 
 extern char **environ;
 extern char *parse_location(char *loc, number_t number);
@@ -80,6 +109,212 @@ struct spank_option spank_options[] =
    SPANK_OPTIONS_TABLE_END
 };
 
+struct spank_option session_option =
+{
+   "spindle-session", NULL, 
+   "Start a Spindle session for this allocation", 0, 0,
+   (spank_opt_cb_f) spindle_session_options
+};
+
+static int should_use_session(spank_t spank) {
+   spank_context_t context;
+   spank_err_t err;
+   char * session_env;
+
+   context = spank_context();
+
+   /* The technique for checking the session flag is different in
+      different contexts. In local, we're running where the args
+      were processed so we can check the flag directly . */
+   if (context == S_CTX_LOCAL) {
+      session_env = getenv(SPANK_SPINDLE_USE_SESSION);
+      return (start_session || session_env);
+   }
+   /* In remote, we're running in a different process, so we check
+      the env var set earlier in the local context. */
+   if (context == S_CTX_REMOTE) {
+      session_env = readSpankEnv(spank, SPANK_SPINDLE_USE_SESSION);
+      if(session_env) {
+         free(session_env);
+         return 1;
+      }
+   }
+   /* In the job script, due to a bug in SPANK, env vars are propagated
+      to the prolog but not the epilog, so in the epilog instead we use
+      spank_option_getopt (but this doesn't work in remote context
+      which is why we need cases for both remote and job script). */
+   if (context == S_CTX_JOB_SCRIPT) {
+      session_env = getenv(SPANK_SPINDLE_USE_SESSION);
+      if (session_env) 
+         return 1;
+      err = spank_option_getopt(spank, &session_option, NULL);
+      return (err == ESPANK_SUCCESS); 
+   }
+
+   return 0;
+}
+
+int slurm_spank_init(spank_t spank, int ac, char *argv[]) {
+   spank_context_t context;
+   context = spank_context();
+   if (context == S_CTX_ALLOCATOR) {
+      spank_option_register(spank, &session_option);
+   }
+   return 0;
+}
+
+int slurm_spank_init_post_opt(spank_t spank, int ac, char *argv[]) { 
+   spank_context_t context;
+   unique_id_t session_unique_id;
+   
+   context = spank_context();
+   /* In sbatch and salloc, forward session status in env var to make it
+      available in in other contexts. */
+   if (context == S_CTX_ALLOCATOR) {
+      if (enable_spindle) {
+         setenv("SPANK_SPINDLE", "1", 1);
+      }
+      if (start_session) {
+         setenv(SPANK_SPINDLE_USE_SESSION, "1", 1);
+      }
+   }
+   return 0;
+}
+
+static int forward_environment(spank_t spank) 
+{
+   spank_err_t err;
+   char * envVal;
+
+   if (should_use_session(spank)) {
+      /* Forward session status from srun to job prolog. */
+      err = spank_job_control_setenv(spank, SPINDLE_USE_SESSION, "1", 1);
+      if (err != ESPANK_SUCCESS) return -1;
+   }
+   envVal = getenv("SPINDLE_DEBUG");
+   if (envVal) {
+       err = spank_job_control_setenv(spank, "SPINDLE_DEBUG", envVal, 1);
+       if (err != ESPANK_SUCCESS) return -1;
+   }
+   envVal = getenv("SPINDLE_TEST");
+   if (envVal) {
+       err = spank_job_control_setenv(spank, "SPINDLE_TEST", envVal, 1);
+       if (err != ESPANK_SUCCESS) return -1;
+   }
+   envVal = getenv("TMPDIR");
+   if (envVal) {
+       err = spank_job_control_setenv(spank, "TMPDIR", envVal, 1);
+       if (err != ESPANK_SUCCESS) return -1;
+   } else {
+       err = spank_job_control_setenv(spank, "TMPDIR", "/tmp", 1);
+       if (err != ESPANK_SUCCESS) return -1;
+   }
+   return 0;
+}    
+
+static int handle_forwarded_environment(void) {
+   char * envVal;
+   envVal = getenv("SPANK_SPINDLE_DEBUG");
+   if (envVal) {
+      setenv("SPINDLE_DEBUG", envVal, 1);
+   }
+   envVal = getenv("SPANK_SPINDLE_TEST");
+   if (envVal) {
+      setenv("SPINDLE_TEST", envVal, 1);
+   }
+   envVal = getenv("SPANK_TMPDIR");
+   if (envVal) {
+      setenv("TMPDIR", envVal, 1);
+   }
+   return 0;
+}
+
+int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[]) {
+   int result;
+   
+   result = forward_environment(spank);
+   return result;
+}
+
+extern char **environ;
+
+int slurm_spank_job_prolog(spank_t spank, int ac, char *argv[]) {
+   spank_context_t context;
+   uid_t userid;
+   start_params_t start_params;
+   spank_err_t err;
+   int result, use_session;
+   char *result_str, *work_dir;
+   
+   context = spank_context();
+   use_session = should_use_session(spank);
+   handle_forwarded_environment();
+
+   if (!use_session) {
+      return 0;
+   }
+
+   // The prolog starts in the user's home directory.
+   // Change to $SLURM_JOB_WORK_DIR so logs go to right place.
+   work_dir = getenv("SLURM_JOB_WORK_DIR");
+   if (work_dir) {
+      chdir(work_dir);
+   }
+
+   err = spank_get_item(spank, S_JOB_UID, &userid);
+   if (err != ESPANK_SUCCESS) {
+      slurm_error("ERROR: Spindle plugin error.  Could not get uid in exit\n");
+      return -1;
+   }
+
+   start_params.spank = spank;
+   start_params.site_argc = ac;
+   start_params.site_argv = argv;
+
+   result = dropPrivilegeAndRun(handleStart, userid, &start_params, &result_str);
+
+   if (result == -1) {
+      slurm_error("Failed to start Spindle for session\n");
+      return -1;
+   }
+
+   return 0;
+}
+
+int slurm_spank_job_epilog(spank_t spank, int ac, char *argv[]) {
+   int result, use_session;
+   char *result_str;
+   spank_err_t err;
+   uid_t userid;
+   exit_params_t exit_params;
+
+   use_session = should_use_session(spank);
+
+   if (!use_session)
+      return 0;
+
+   // If session, shutdown BE and FE here.
+   err = spank_get_item(spank, S_JOB_UID, &userid);
+   if (err != ESPANK_SUCCESS) {
+      slurm_error("ERROR: Spindle plugin error.  Could not get uid in epilog exit\n");
+      return -1;
+   }
+
+   exit_params.spank = spank;
+   exit_params.site_argc = ac;
+   exit_params.site_argv = argv;
+
+   result = dropPrivilegeAndRun(handleExit, userid, &exit_params, &result_str);
+   
+   if (result == -1) {
+      slurm_error("Failed to run handleExit.  Spindle may not shutdown properly\n");
+      return -1;
+   }
+   
+   // TODO last-chance opportunity to stop Spindle processes
+   return 0;
+}
+
 int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
 {
    spank_context_t context;
@@ -87,6 +322,16 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
    saved_env_t *env = NULL;
    static int initialized = 0;
    spindle_args_t params = {0};
+   int use_session;
+   uid_t userid;
+   start_params_t start_params;
+   saved_env_t *saved_env;
+   char *result_str;
+   spank_err_t err;
+
+   context = spank_context();
+   use_session = should_use_session(spank);
+   unique_id_t my_id = getUniqueID(spank, use_session);
 
    if (!enable_spindle)
       return 0;
@@ -95,7 +340,6 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
       return 0; //No spindle calls as root
    }   
 
-   context = spank_context();
    if (context == S_CTX_ERROR) {
       slurm_error("ERROR: spank_context returned an error in spindle task_init plugin.\n");
       return -1;
@@ -109,8 +353,8 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
    
    push_env(spank, &env);
    sdprintf(1, "Beginning spindle plugin\n");
-   
-   result = process_spindle_args(spank, site_argc, site_argv, &params, NULL, NULL);
+
+   result = process_spindle_args(spank, site_argc, site_argv, &params, NULL, NULL, use_session);
    if (result == -1) {
       sdprintf(1, "Error processesing spindle arguments.  Aborting spindle\n");
       goto done;
@@ -120,10 +364,15 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
      return 0;
    }
 
-   result = launch_spindle(spank, &params);
-   if (result == -1) {
-      sdprintf(1, "Error launching spindle.  Aborting spindle\n");
-      goto done;
+   /* When using a session, handle start in job prolog, not here. */
+   if (!use_session) {
+      start_params.spank = spank;
+      start_params.site_argc = site_argc;
+      start_params.site_argv = site_argv;
+
+      push_env(spank, &saved_env);   
+      result = handleStart(&start_params, &result_str);
+      pop_env(saved_env);
    }
 
    result = prepApp(spank, &params);
@@ -142,27 +391,67 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
    return func_result;
 }
 
+static int handleStart(void *params, char **output_str) 
+{
+   start_params_t *start_params;
+   spank_t spank;
+   int site_argc, result, use_session;
+   char **site_argv;
+   spindle_args_t args = {0};
+
+   start_params = (start_params_t *) params;
+   spank = start_params->spank;
+   site_argc = start_params->site_argc;
+   site_argv = start_params->site_argv;
+
+   sdprintf(1, "In handleStart\n");
+   use_session = should_use_session(spank);
+   result = process_spindle_args(spank, site_argc, site_argv, &args, NULL, NULL, use_session);
+   if (result == -1) {
+      sdprintf(1, "ERROR: Could not process spindle args in handlestart\n");
+      return -1;
+   }
+   
+   if (args.opts & OPT_OFF) {
+      return 0;
+   }
+   
+   result = launch_spindle(spank, &args);
+   if (result == -1) {
+      sdprintf(1, "Error launching spindle.  Aborting spindle\n");
+      return -1;
+   }
+   return 0;
+}
+
 int slurm_spank_task_exit(spank_t spank, int site_argc, char *site_argv[])
 {
    spank_context_t context;
    char *result_str;
-   int result;
+   int result, use_session;
    uid_t userid;
    spank_err_t err;
    saved_env_t *saved_env;
    exit_params_t exit_params;
 
+   context = spank_context();
+
    if (!enable_spindle) {
       return 0;
    }
 
-   context = spank_context();
    if (context == S_CTX_ERROR) {
       slurm_error("ERROR: spank_context returned an error in spindle exit plugin.\n"); 
       return -1;
    }
    
    if (context != S_CTX_REMOTE) {
+      return 0;
+   }
+
+   use_session = should_use_session(spank);
+   if (use_session) {
+      /* When using a session, leave Spindle running between steps. */
       return 0;
    }
 
@@ -187,7 +476,7 @@ int slurm_spank_task_exit(spank_t spank, int site_argc, char *site_argv[])
    return 0;
 }
 
-static unique_id_t getUniqueID(spank_t spank)
+static unique_id_t getUniqueID(spank_t spank, int session_enabled)
 {
    char *slurm_job_id_s, *slurm_step_id_s;
    spank_err_t err;
@@ -206,26 +495,30 @@ static unique_id_t getUniqueID(spank_t spank)
       }
    }
 
-   slurm_step_id_s = getenv("SLURM_STEP_ID");
-   if (slurm_step_id_s) {
-      stepid = (uint32_t) atol(slurm_step_id_s);
-   }
-   else {
-      err = spank_get_item(spank, S_JOB_STEPID, &stepid);
-      if (err != ESPANK_SUCCESS) {
-         slurm_error("Could not setup spindle: Could not get SLURM_STEP_ID");
-         return 0;
+   if (!session_enabled) {
+      slurm_step_id_s = getenv("SLURM_STEP_ID");
+      if (slurm_step_id_s) {
+         stepid = (uint32_t) atol(slurm_step_id_s);
       }
-   }
+      else {
+         err = spank_get_item(spank, S_JOB_STEPID, &stepid);
+         if (err != ESPANK_SUCCESS) {
+            slurm_error("Could not setup spindle: Could not get SLURM_STEP_ID");
+            return 0;
+         }
+      }
 
-   combined = stepid;
-   combined <<= 32;
-   combined |= jobid;
-   sdprintf(2, "Computed unique_id for session as %lu\n", (unsigned long) combined);
+      combined = stepid;
+      combined <<= 32;
+      combined |= jobid;
+   } else {
+      combined = jobid;
+   }
+   sdprintf(2, "Computed unique_id for session as %llu, session_enabled = %d\n", (unsigned long long) combined, session_enabled);
    return combined;
 }
 
-static int fillInArgs(spank_t spank, spindle_args_t *args, int argc, char **argv, unique_id_t unique_id)
+static int fillInArgs(spank_t spank, spindle_args_t *args, int argc, char **argv, unique_id_t unique_id, int session_enabled)
 {
    int result;
    char *oldlocation;
@@ -243,9 +536,15 @@ static int fillInArgs(spank_t spank, spindle_args_t *args, int argc, char **argv
       sdprintf(1, "Error processesing spindle options: %s\n", err_string ? err_string : "UNKNOWN");
       return -1;
    }
-   args->opts |= OPT_BEEXIT;
    args->use_launcher = slurm_plugin_launcher;
    args->startup_type = startup_external;
+
+   if (session_enabled) {
+      args->opts |= OPT_PERSIST;
+      args->opts |= OPT_SESSION;
+   } else {
+      args->opts |= OPT_BEEXIT;
+   }
 
    oldlocation = args->location;
    current_spank = spank;
@@ -255,7 +554,7 @@ static int fillInArgs(spank_t spank, spindle_args_t *args, int argc, char **argv
    return 0;
 }
 
-static int process_spindle_args(spank_t spank, int site_argc, char *site_argv[], spindle_args_t *params, int *out_argc, char ***out_argv)
+static int process_spindle_args(spank_t spank, int site_argc, char *site_argv[], spindle_args_t *params, int *out_argc, char ***out_argv, int session_enabled)
 {
    char *site_options = NULL, *combined_options = NULL;
    size_t combined_options_size, site_options_size, user_options_size;
@@ -264,7 +563,7 @@ static int process_spindle_args(spank_t spank, int site_argc, char *site_argv[],
    char *spindle_config = NULL;
    unique_id_t unique_id;
 
-   unique_id = getUniqueID(spank);
+   unique_id = getUniqueID(spank, session_enabled);
    if (!unique_id)
       return -1;
       
@@ -290,7 +589,7 @@ static int process_spindle_args(spank_t spank, int site_argc, char *site_argv[],
    sdprintf(1, "Combined site and user options are \"%s\"\n", combined_options);
 
    decodeCmdArgs(combined_options, &combined_argc, &combined_argv);
-   result = fillInArgs(spank, params, combined_argc, combined_argv, unique_id);
+   result = fillInArgs(spank, params, combined_argc, combined_argv, unique_id, session_enabled);
    if (result == -1)
       goto done;
 
@@ -327,6 +626,18 @@ static int get_num_hosts(spank_t spank)
    int result;
    spank_err_t err;
    
+   num_hosts_str = getenv("SLURM_STEP_NUM_NODES");
+   if (num_hosts_str) {
+      result = atoi(num_hosts_str);
+      if (result > 0)
+         return (int) result;
+   }
+   num_hosts_str = getenv("SLURM_JOB_NUM_NODES");
+   if (num_hosts_str) {
+      result = atoi(num_hosts_str);
+      if (result > 0)
+         return (int) result;
+   }
    num_hosts_str = getenv("SLURM_NNODES");
    if (num_hosts_str) {
       result = atoi(num_hosts_str);
@@ -344,7 +655,9 @@ static char **get_hostlist(spank_t spank, unsigned int num_hosts)
 {
    char *short_hosts, **hostlist;;
 
-   short_hosts = readSpankEnv(spank, "SLURM_JOB_NODELIST");
+   short_hosts = readSpankEnv(spank, "SLURM_STEP_NODELIST");
+   if (!short_hosts)
+      short_hosts = readSpankEnv(spank, "SLURM_JOB_NODELIST");
    if (!short_hosts)
       short_hosts = readSpankEnv(spank, "SLURM_NODELIST");
    if (!short_hosts) {
@@ -504,6 +817,12 @@ static int spindle_options(int val, const char *optarg, int remote)
    return 0;
 }
 
+static int spindle_session_options(int val, const char *optarg, int remote)
+{
+   start_session = 1;
+   return 0;
+}
+
 char *custom_getenv(char *envname)
 {
    return readSpankEnv(current_spank, envname);
@@ -531,16 +850,21 @@ static int launchFE(char **hostlist, spindle_args_t *params)
       exit(-1);
    }
 
-   result = spindleWaitForCloseFE(params);
-   if (result == -1) {
-      sdprintf(1, "ERROR: Could not wait for FE close\n");      
+   if (params->opts & OPT_SESSION) {
+      result = waitForSpankSessionEnd(params);
+   } else {
+      result = spindleWaitForCloseFE(params);  
    }
-   
+
+   if (result == -1) {
+       sdprintf(1, "ERROR: Could not wait for FE close\n");      
+   }
+      
    sdprintf(1, "FE received exit signal.  Shutting down FE\n");
    result = spindleCloseFE(params);
    if (result == -1) {
-      sdprintf(1, "ERROR: Could not clean up FE.\n");
-      exit(-1);
+       sdprintf(1, "ERROR: Could not clean up FE.\n");
+       exit(-1);
    }
    exit(0);
 }
@@ -588,7 +912,7 @@ static int launchBE(spank_t spank, spindle_args_t *params)
 static int prepApp(spank_t spank, spindle_args_t *params)
 {
 #if HAVE_DECL_SPANK_PREPEND_TASK_ARGV == 1
-   int result;
+   int result, i;
 #else
    int app_argc, result;
    char **app_argv;
@@ -606,6 +930,10 @@ static int prepApp(spank_t spank, spindle_args_t *params)
       
 #if HAVE_DECL_SPANK_PREPEND_TASK_ARGV == 1
    sdprintf(2, "Prepping task process %d to run spindle using spank_prepend_task_argv method\n", getpid());
+   sdprintf(2, "spank_prepend_task_argv will prepend %d args\n", bootstrap_argc);
+   for(i = 0; i < bootstrap_argc; ++i) {
+      sdprintf(2, "bootstrap_argv[%d] = %s\n", i, bootstrap_argv[i]);
+   }
 
    const char **filter_argv = (const char **)bootstrap_argv;
    err = spank_prepend_task_argv(spank, bootstrap_argc, filter_argv);
@@ -641,9 +969,11 @@ static int handleExit(void *params, char **output_str)
 {
    exit_params_t *exit_params;
    spank_t spank;
-   int site_argc, result, is_be_leader;
-   char **site_argv;
+   int site_argc, result, is_be_leader, is_fe_host, use_session, num_hosts_result;
+   unsigned int num_hosts;
+   char **site_argv, **hostlist;
    spindle_args_t args = {0};
+   int launch_result = -1;
 
    exit_params = (exit_params_t *) params;
    spank = exit_params->spank;
@@ -651,7 +981,8 @@ static int handleExit(void *params, char **output_str)
    site_argv = exit_params->site_argv;
 
    sdprintf(1, "In handleExit\n");
-   result = process_spindle_args(spank, site_argc, site_argv, &args, NULL, NULL);
+   use_session = should_use_session(spank);
+   result = process_spindle_args(spank, site_argc, site_argv, &args, NULL, NULL, use_session);
    if (result == -1) {
       sdprintf(1, "ERROR: Could not process spindle args in handleExit\n");
       return -1;
@@ -667,11 +998,29 @@ static int handleExit(void *params, char **output_str)
       // The task_exit callback is run for _each proc_, so we use
       // isBEProc to pick only one proc per node to call spindleExitBE.
       is_be_leader = isBEProc(&args, 1);
-      if (is_be_leader) {
-         result = spindleExitBE(args.location);
-         if (result == -1) {
-             sdprintf(1, "ERROR: spindleExitBE returned an error on location %s\n", args.location);
-             return -1;
+      if (is_be_leader) { 
+         if (use_session) {
+            num_hosts_result = get_num_hosts(spank);
+            if (num_hosts_result == -1)
+                return -1;
+            num_hosts = (unsigned int) num_hosts_result;
+            hostlist = get_hostlist(spank, num_hosts);
+            if (!hostlist)
+                return -1;
+            is_fe_host = isFEHost(hostlist, num_hosts);
+            if (is_fe_host) {
+               result = signalSpankSessionEnd(&args); 
+               if (result == -1) {
+                  sdprintf(1, "ERROR: Could not clean up FE.\n");
+                  return -1;
+               }
+            }
+         } else {
+            result = spindleExitBE(args.location);
+            if (result == -1) {
+                sdprintf(1, "ERROR: spindleExitBE returned an error on location %s\n", args.location);
+                return -1;
+            }
          }
       }
    }

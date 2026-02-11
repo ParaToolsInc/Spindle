@@ -7,8 +7,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/un.h>
+#include <sys/socket.h>
 #include <fcntl.h>
-#include <sys/types.h>
 #include <pwd.h>
 #include "plugin_utils.h"
 
@@ -257,18 +258,12 @@ int isFEHost(char **hostlist, unsigned int num_hosts)
    return feresult;      
 }
 
-char *unique_file = NULL;
-
-#define UNIQUE_FILE_NAME "spindle_unique"
-
-int isBEProc(spindle_args_t *params, unsigned int exit_phase)
+static char* locSpecificDir(spindle_args_t *params) 
 {
-   char *dir = NULL, *expanded_dir = NULL, *realized_dir = NULL, *phase_name = NULL;
+   char *dir = NULL, *expanded_dir = NULL, *realized_dir = NULL;
    char hostname[256], session_id_str[32];
    size_t unique_file_len;
-   int beproc_result = -1;
-   int fd = -1, error;
-   
+
    dir = params->location;
    if (!dir) {
       sdprintf(1, "ERROR: Location not filled in\n");
@@ -283,6 +278,201 @@ int isBEProc(spindle_args_t *params, unsigned int exit_phase)
    if (!realized_dir) {
       sdprintf(1, "ERROR: Could not turn dir to a real path\n");
    }
+
+  done:
+   if (expanded_dir)
+      free(expanded_dir);
+
+   return realized_dir;
+}
+
+#define SOCKET_PREFIX "spFE"
+
+static char* exitSocketPath(spindle_args_t *params)
+{
+   char *realized_dir, *socket_path = NULL;
+   char session_id_str[32];
+   size_t socket_path_len;
+
+   realized_dir = locSpecificDir(params);
+   if (!realized_dir) {
+      err_printf("Could not get real path for FE exit socket\n");
+      goto done;
+   }
+
+   snprintf(session_id_str, sizeof(session_id_str), "%lu", (unsigned long) params->number);
+
+   socket_path_len = strlen(realized_dir) + 1 + 
+                     strlen(SOCKET_PREFIX) + 1 + 
+                     strlen(session_id_str) + 1;
+
+   socket_path = (char *) malloc(sizeof(char) * socket_path_len);
+   snprintf(socket_path, socket_path_len, "%s/%s.%s", realized_dir, SOCKET_PREFIX, session_id_str);
+
+  done:
+   if (realized_dir)
+      free(realized_dir);
+
+   return socket_path;
+}
+
+static int createFEExitSocket(char *socket_path) 
+{
+   struct sockaddr_un local;
+   int result, sock = -1, retval = -1;
+
+   debug_printf("Creating unix socket for session at %s\n", socket_path);
+   sock = socket(AF_UNIX, SOCK_STREAM, 0);
+   if (sock == -1) {
+      int error = errno;
+      err_printf("Could not create socket for spindle session: %s\n", strerror(error));
+      goto done;
+   }
+
+   local.sun_family = AF_UNIX;
+   strncpy(local.sun_path, socket_path, sizeof(local.sun_path)-1);
+   result = bind(sock, (struct sockaddr *) &local, sizeof(local));
+   if (result == -1) {
+      int error = errno;
+      err_printf("Could not bind socket %s for spindle session: %s\n", local.sun_path, strerror(error));
+      goto done;
+   }
+
+   result = listen(sock, 1);
+   if (result == -1) {
+      int error = errno;
+      err_printf("Could not listen on server socket %s for spindle session: %s", local.sun_path, strerror(error));
+      goto done;
+   }
+   retval = sock;
+   
+  done:
+   if (sock != -1 && result == -1)
+      close(sock); 
+
+   return retval;
+}
+
+int waitForSpankSessionEnd(spindle_args_t *params) 
+{
+   int fd = -1, sockfd = -1, error, retval = -1, result;
+   char msg;
+   char *socket_path = NULL;
+
+   sdprintf(2, "In waitForSpankSessionEnd\n");
+
+   socket_path = exitSocketPath(params);
+   if (!socket_path) 
+      goto done;
+
+   sockfd = createFEExitSocket(socket_path);
+   if (sockfd == -1) 
+      goto done;
+   
+   fd = accept(sockfd, NULL, NULL);
+   if (fd == -1) {
+      error = errno;
+      err_printf("Could not accept session exit socket connection: %s\n", strerror(error));
+      goto done;
+   }
+
+   do {
+      result = read(fd, &msg, 1);
+   } while (result == -1 && errno == EINTR);
+   if (result == -1) {
+      error = errno;
+      err_printf("Failed to read from session exit socket: %s\n", strerror(error));
+      goto done;
+   }
+   if (msg != 'q') {
+      error = errno;
+      err_printf("Recieved incorrect msg character: %c\n", msg);
+      goto done;
+   }
+   
+   sdprintf(2, "Received session exit message\n");   
+   retval = 0;
+
+  done:
+   if (fd != -1)
+      close(fd);
+   if (sockfd != -1)
+      close(sockfd);
+   if (socket_path) {
+      unlink(socket_path);
+      free(socket_path);
+   }
+   return retval;
+}
+
+int signalSpankSessionEnd(spindle_args_t *params) 
+{
+   int sockfd = -1, error, retval = -1, result;
+   char msg;
+   struct sockaddr_un saddr;
+   char *socket_path = NULL;
+
+   sdprintf(2, "In signalSpankSessionEnd\n");
+
+   socket_path = exitSocketPath(params);
+   if (!socket_path) 
+      goto done;
+
+   sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+   if (sockfd == -1) {
+      error = errno;
+      err_printf("Could not create session exit socket: %s\n", strerror(error));
+      goto done;
+   }
+
+   saddr.sun_family = AF_UNIX;
+   strncpy(saddr.sun_path, socket_path, sizeof(saddr.sun_path)-1);
+
+   result = connect(sockfd, (const struct sockaddr *) &saddr, sizeof(saddr));
+   if (result == -1) {
+      int error = errno;
+      err_printf("Failed to connect to session exit socket: %s\n", strerror(error));
+      return -1;
+   }
+
+   msg = 'q';
+   do {
+      result = write(sockfd, &msg, 1);
+   } while (result == -1 && errno == EINTR);
+   if (result == -1) {
+      error = errno;
+      err_printf("Failed to write value to session exit socket: %s\n", strerror(error));
+      goto done;
+   }
+   if (result == 0) {
+      err_printf("Socket closed before we could write to session exit socket\n");
+      goto done;
+   }
+
+   retval = 0;
+   
+  done:
+   if (sockfd != -1)
+      close(sockfd);
+   if (socket_path) 
+      free(socket_path);
+
+   return retval;
+}
+
+char *unique_file = NULL;
+
+#define UNIQUE_FILE_NAME "spindle_unique"
+
+int isBEProc(spindle_args_t *params, unsigned int exit_phase)
+{
+   char *realized_dir = NULL, *phase_name = NULL;
+   char hostname[256], session_id_str[32];
+   size_t unique_file_len;
+   int beproc_result = -1;
+   int fd = -1, error;
+   
+   realized_dir = locSpecificDir(params);
 
    gethostname(hostname, sizeof(hostname));
    hostname[sizeof(hostname)-1] = '\0';
@@ -317,8 +507,6 @@ int isBEProc(spindle_args_t *params, unsigned int exit_phase)
    }
    
   done:
-   if (expanded_dir)
-      free(expanded_dir);
    if (realized_dir)
       free(realized_dir);
    if (fd != -1)
@@ -1021,6 +1209,14 @@ char *readSpankEnv(spank_t spank, const char *envname)
    char *buffer;
    int buffer_size = 4096;
    spank_err_t err;
+   spank_context_t ctx;
+
+   /* spank_getenv crashes if called from S_CTX_JOB_SCRIPT */
+   ctx = spank_context();
+   if (ctx == S_CTX_JOB_SCRIPT) {
+      buffer = getenv(envname);
+      return buffer ? strdup(buffer) : NULL;
+   }
 
    buffer = (char *) malloc(buffer_size);
    for (;;) {

@@ -46,6 +46,9 @@ int isFEHost(char **hostlist, unsigned int num_hosts);
 extern char *unique_file;
 int isBEProc(spindle_args_t *params, unsigned int exit_phase);
 
+int waitForSpankSessionEnd(spindle_args_t *params);
+int signalSpankSessionEnd(spindle_args_t *params);
+
 char *encodeCmdArgs(int sargc, char **sargv);
 void decodeCmdArgs(char *cmd, int *sargc, char ***sargv);
 
