@@ -5,6 +5,14 @@ ENV workers=${replicas}
 
 ARG BUILD_ROOT=containers/spindle-slurm-ubuntu/testing
 
+RUN apt-get update \
+    && DEBIAN_FRONTEND="noninteractive" apt-get -qq install -y --no-install-recommends \
+    fd-find \
+    vim \ 
+    gdb \
+    exuberant-ctags \
+    silversearcher-ag
+
 # Slurm daemons run as $SLURM_USER
 ARG SLURM_USER=slurm
 
@@ -19,6 +27,8 @@ COPY ${BUILD_ROOT}/conf/slurmdbd.conf /home/${SLURM_USER}/slurmdbd.conf
 COPY ${BUILD_ROOT}/conf/cgroup.conf /home/${SLURM_USER}/cgroup.conf
 RUN /setup_slurm.sh
 
+RUN echo 'TMPDIR="/tmp"' >> /etc/environment
+
 # Slurm without Spank plugin needs passwordless ssh
 USER ${USER}
 WORKDIR /home/${USER}
@@ -31,6 +41,9 @@ RUN mkdir -p /home/${USER}/Spindle
 COPY . /home/${USER}/Spindle
 COPY ${BUILD_ROOT}/scripts/build_spindle.sh /home/${USER}/build_spindle.sh
 RUN ./build_spindle.sh
+
+RUN sudo mkdir -p /shared && \
+    sudo chown -R ${USER}:${USER} /shared
 
 COPY ${BUILD_ROOT}/scripts/entrypoint.sh /home/${USER}/entrypoint.sh
 ENV PATH /home/${USER}/Spindle-inst/bin:$PATH

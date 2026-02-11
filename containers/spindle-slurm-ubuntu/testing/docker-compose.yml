@@ -35,11 +35,16 @@ networks:
   slurm:
     driver: bridge
 
+volumes:
+  shared:
+
 # Common parameters for all nodes.
 x-shared-node-parameters: &shared-node-parameters
   build: *shared-build-context
   networks:
     - slurm
+  volumes:
+    - shared:/shared
   cap_add:
     - SYS_NICE # Required for libnuma
 

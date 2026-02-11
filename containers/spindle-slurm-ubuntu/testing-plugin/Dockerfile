@@ -5,6 +5,14 @@ ENV workers=${replicas}
 
 ARG BUILD_ROOT=containers/spindle-slurm-ubuntu/testing-plugin
 
+RUN apt-get update \
+    && DEBIAN_FRONTEND="noninteractive" apt-get -qq install -y --no-install-recommends \
+    fd-find \
+    vim \ 
+    gdb \
+    exuberant-ctags \
+    silversearcher-ag
+
 # Slurm daemons run as $SLURM_USER
 ARG SLURM_USER=slurm
 
@@ -34,6 +42,9 @@ COPY ${BUILD_ROOT}/conf/plugstack.conf /home/${SLURM_USER}/plugstack.conf
 RUN /setup_spank_plugin.sh
 
 USER ${USER}
+
+RUN sudo mkdir -p /shared && \
+    sudo chown -R ${USER}:${USER} /shared
 
 COPY ${BUILD_ROOT}/scripts/entrypoint.sh /home/${USER}/entrypoint.sh
 ENV PATH /home/${USER}/Spindle-inst/bin:$PATH
