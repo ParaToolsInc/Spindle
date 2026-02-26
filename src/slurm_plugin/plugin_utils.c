@@ -1021,6 +1021,14 @@ char *readSpankEnv(spank_t spank, const char *envname)
    char *buffer;
    int buffer_size = 4096;
    spank_err_t err;
+   spank_context_t ctx;
+
+   /* spank_getenv crashes if called from S_CTX_JOB_SCRIPT */
+   ctx = spank_context();
+   if (ctx == S_CTX_JOB_SCRIPT) {
+      buffer = getenv(envname);
+      return buffer ? strdup(buffer) : NULL;
+   }
 
    buffer = (char *) malloc(buffer_size);
    for (;;) {
