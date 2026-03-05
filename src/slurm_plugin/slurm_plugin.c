@@ -1,4 +1,5 @@
 /*
+
 This file is part of Spindle.  For copyright information see the COPYRIGHT 
 file in the top level directory, or at 
 https://github.com/hpc/Spindle/blob/master/COPYRIGHT
@@ -88,6 +89,8 @@ static int process_spindle_args(spank_t spank, int site_argc, char *site_argv[],
 static int handleExit(void *params, char **output_str);
 static int handleStart(void *params, char **output_str);
 static int get_num_hosts(spank_t spank);
+static int get_num_hosts_job(spank_t spank);
+static int get_num_hosts_step(spank_t spank);
 static char **get_hostlist(spank_t spank, unsigned int num_hosts);
    
 static pid_t pidBE = 0;
@@ -229,14 +232,52 @@ static int handle_forwarded_environment(void) {
    return 0;
 }
 
+extern char **environ; // TODO get rid of this
+
+void print_env(void) // TODO get rid of this
+{
+   for (char **env = environ; *env != NULL; env++) {
+       puts(*env);
+   }
+}
+
 int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[]) {
-   int result;
+   int result, use_session, num_hosts;
+   char * envVal;
    
    result = forward_environment(spank);
+   if (result == -1)
+      goto done;
+
+   use_session = should_use_session(spank); 
+   if (!use_session)
+      goto done;
+
+   
+   slurm_spank_log("Checking if already in session init");
+   // TODO only do this if first srun
+   envVal = getenv("SPANK_SPINDLE_SESSION_INIT");
+   if (envVal && strcmp(envVal, "1") == 0) 
+      goto done;
+
+   slurm_spank_log("Setting inside session init");
+   setenv("SPANK_SPINDLE_SESSION_INIT", "1", 1);
+   num_hosts = get_num_hosts_job(spank);
+   print_env();
+   if (num_hosts == -1) {
+      slurm_error("ERROR: Spindle plugin error. Unable to get number of hosts\n");
+      result = -1;
+      goto done;
+   }
+
+   slurm_spank_log("Will try to srun on %d nodes", num_hosts);
+   result = srunAllNodes((unsigned int)num_hosts, "/bin/true");
+
+
+  done:
    return result;
 }
 
-extern char **environ;
 
 int slurm_spank_job_prolog(spank_t spank, int ac, char *argv[]) {
    spank_context_t context;
@@ -619,19 +660,13 @@ static int process_spindle_args(spank_t spank, int site_argc, char *site_argv[],
    return post_opt_result;
 }
 
-static int get_num_hosts(spank_t spank)
+static int get_num_hosts_job(spank_t spank)
 {
    char *num_hosts_str;
    uint32_t num_hosts;
    int result;
    spank_err_t err;
-   
-   num_hosts_str = getenv("SLURM_STEP_NUM_NODES");
-   if (num_hosts_str) {
-      result = atoi(num_hosts_str);
-      if (result > 0)
-         return (int) result;
-   }
+
    num_hosts_str = getenv("SLURM_JOB_NUM_NODES");
    if (num_hosts_str) {
       result = atoi(num_hosts_str);
@@ -648,7 +683,32 @@ static int get_num_hosts(spank_t spank)
    if (err != ESPANK_SUCCESS)
       return -1;
    return num_hosts;
+}
 
+static int get_num_hosts_step(spank_t spank)
+{
+   char *num_hosts_str;
+   int result;
+   
+   num_hosts_str = getenv("SLURM_STEP_NUM_NODES");
+   if (num_hosts_str) {
+      result = atoi(num_hosts_str);
+      if (result > 0)
+         return (int) result;
+   }
+
+   return -1;
+}
+
+static int get_num_hosts(spank_t spank)
+{
+   int result;
+   
+   result = get_num_hosts_step(spank);
+   if (result == -1)
+      result = get_num_hosts_job(spank);
+
+   return result;
 }
 
 static char **get_hostlist(spank_t spank, unsigned int num_hosts)

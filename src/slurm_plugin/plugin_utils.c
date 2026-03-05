@@ -34,6 +34,47 @@ extern char *parse_location(char *loc, number_t number);
 extern char *realize(char *path);
 extern int spindle_mkdir(char *orig_path);
 
+int srunAllNodes(unsigned int num_nodes, const char *command) 
+{
+   pid_t pid;
+   int result, status, error;
+
+   pid = fork();
+   if (pid == -1) {
+      error = errno;
+      sdprintf(1, "ERROR: Failed for fork for srun: %s\n", strerror(error));
+      return -1;
+   } else if (pid == 0) {
+      // In child
+      char n[12];
+      snprintf(n, sizeof(n), "%u", num_nodes);
+      fprintf(stderr, "Going to srun on %s nodes\n", n);
+      execlp("srun",
+             "srun", 
+             "--nodes", n,
+             "--ntasks", n,
+             "--external-launcher",
+             "--spindle",
+             command,
+             (char*)NULL);
+      error = errno;
+      sdprintf(1, "ERROR: Failed to exec srun: %s\n", strerror(error));
+      exit(-1);
+   } else {
+      // In parent
+      result = waitpid(pid, &status, 0);
+      if (result == -1) {
+         error = errno;
+         sdprintf(1, "ERROR: Failed to wait for srun: %s\n", strerror(error));
+         return -1;
+      } else if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+         sdprintf(1, "ERROR: Failure in srun");
+         return -1;
+      }
+   }
+   return 0;
+}
+
 char **getHostsScontrol(unsigned int num_hosts, const char *hoststr)
 {
    const char *scontrol_path = SLURM_SCONTROL_BIN;
@@ -351,6 +392,21 @@ static int createFEExitSocket(char *socket_path)
       close(sock); 
 
    return retval;
+}
+
+int doesFEExitSocketExist(spindle_args_t *params) 
+{
+   struct stat sb;
+   char * socket_path = NULL;
+   
+   socket_path = exitSocketPath(params);
+   if (!socket_path)
+      return 0;
+
+   if (stat(socket_path, &sb) == -1)
+      return 0;
+
+   return S_ISSOCK(sb.st_mode);
 }
 
 int waitForSpankSessionEnd(spindle_args_t *params) 
