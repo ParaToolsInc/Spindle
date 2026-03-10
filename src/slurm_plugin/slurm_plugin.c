@@ -75,7 +75,8 @@ static int get_spindle_args(spank_t spank, spindle_args_t *params);
 #endif
 
 static int should_use_session(spank_t spank);
-static int forward_environment(spank_t spank);
+static int forward_environment_to_job_control(spank_t spank);
+static int forward_environment_to_slurmstepd(spank_t spank);
 static int handle_forwarded_environment(void);
 static int launchFE(char **hostlist, spindle_args_t *params);
 static int launchBE(spank_t spank, spindle_args_t *params);
@@ -184,7 +185,7 @@ int slurm_spank_init_post_opt(spank_t spank, int ac, char *argv[]) {
    return 0;
 }
 
-static int forward_environment(spank_t spank) 
+static int forward_environment_to_job_control(spank_t spank) 
 {
    spank_err_t err;
    char * envVal;
@@ -214,6 +215,32 @@ static int forward_environment(spank_t spank)
    }
    return 0;
 }    
+
+static int forward_environment_to_slurmstepd(spank_t spank) 
+{
+   char *debugEnv, *testEnv, *tmpEnv;
+
+   debugEnv= readSpankEnv(spank, "SPINDLE_DEBUG");
+   testEnv = readSpankEnv(spank, "SPINDLE_TEST");
+   tmpEnv = readSpankEnv(spank, "TMPDIR");
+
+   if (debugEnv) {
+      setenv("SPINDLE_DEBUG", debugEnv, 1);
+      free(debugEnv);
+   }
+
+   if (testEnv) {
+      setenv("SPINDLE_TEST", testEnv, 1);
+      free(testEnv);
+   }
+
+   if (tmpEnv) {
+      setenv("TMPDIR", tmpEnv, 1);
+      free(tmpEnv);
+   }
+
+   return 0;
+}
 
 static int handle_forwarded_environment(void) {
    char * envVal;
@@ -245,7 +272,7 @@ int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[]) {
    int result, use_session, num_hosts;
    char * envVal;
    
-   result = forward_environment(spank);
+   result = forward_environment_to_job_control(spank);
    if (result == -1)
       goto done;
 
@@ -370,16 +397,14 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
    char *result_str;
    spank_err_t err;
 
-   context = spank_context();
-   use_session = should_use_session(spank);
-   unique_id_t my_id = getUniqueID(spank, use_session);
-
    if (!enable_spindle)
       return 0;
 
    if (getuid() == 0) {
       return 0; //No spindle calls as root
    }   
+
+   context = spank_context();
 
    if (context == S_CTX_ERROR) {
       slurm_error("ERROR: spank_context returned an error in spindle task_init plugin.\n");
@@ -391,9 +416,17 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
    if (initialized) {
       return 0;
    }
-   
-   push_env(spank, &env);
+
+   // We need to acquire the job environment before we do anything that
+   // will spawn the log daemon so that SPINDLE_DEBUG and SPINDLE_TEST
+   // are set appropriately.
+   forward_environment_to_slurmstepd(spank);
+
    sdprintf(1, "Beginning spindle plugin\n");
+   push_env(spank, &env);
+   use_session = should_use_session(spank);
+   unique_id_t my_id = getUniqueID(spank, use_session);
+   
 
    result = process_spindle_args(spank, site_argc, site_argv, &params, NULL, NULL, use_session);
    if (result == -1) {
@@ -411,9 +444,7 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
       start_params.site_argc = site_argc;
       start_params.site_argv = site_argv;
 
-      push_env(spank, &saved_env);   
       result = handleStart(&start_params, &result_str);
-      pop_env(saved_env);
    }
 
    result = prepApp(spank, &params);
