@@ -323,12 +323,18 @@ int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[])
    
    if (params.opts & OPT_RSHLAUNCH) {
       slurm_spank_log("Skipping job-start srun because RSHLAUNCH is used"); //TODO make spindle debug msg ~nchaimov
+      err = spank_job_control_setenv(spank, "SPINDLE_RSHLAUNCH", "1", 1);
+      if (err != ESPANK_SUCCESS) {
+         slurm_error("ERROR: Spindle plugin error. Could not set job control env var.");
+         return -1;
+      }
       goto done;
    }
    
    err = get_stepid(spank, &stepid);
    if (err != ESPANK_SUCCESS) {
      slurm_error("ERROR: Spindle plugin error. Could not get step id.");
+     return -1;
    }
    slurm_spank_log("slurm_spank_local_user_init: step id = %u", stepid); // TODO remove ~nchaimov
 
@@ -365,18 +371,24 @@ int slurm_spank_job_prolog(spank_t spank, int ac, char *argv[]) {
    uid_t userid;
    start_params_t start_params;
    spank_err_t err;
-   int result, use_session, job_nnodes;
-   char *result_str, *work_dir, **job_nodelist;
+   int result, use_session;
+   char *result_str, *work_dir, *envVal;
    
    context = spank_context(); // TODO remove ~nchaimov
    handle_forwarded_environment();
    use_session = should_use_session(spank);
 
    if (!use_session) {
-      slurm_spank_log("Not a session, job prolog exiting...")
+      slurm_spank_log("Not a session, job prolog exiting...");
       return 0;
    }
    slurm_spank_log("This is a session");
+   
+   envVal = getenv("SPANK_SPINDLE_RSHLAUNCH");
+   if (envVal && strcmp(envVal, "1") == 0) {
+      slurm_spank_log("rshlaunch used, job prolog exiting...");
+      return 0;
+   }
 
    // The prolog starts in the user's home directory.
    // Change to $SLURM_JOB_WORK_DIR so logs go to right place.
@@ -492,8 +504,9 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
      return 0;
    }
 
-   /* When using a session, handle start in job prolog, not here. */
-   if (!use_session) {
+
+   /* When using a session without RSHLAUNCH, handle start in job prolog, not here. */
+   if ((!use_session) || (params.opts & OPT_RSHLAUNCH)) {
       start_params.spank = spank;
       start_params.site_argc = site_argc;
       start_params.site_argv = site_argv;
@@ -522,8 +535,10 @@ static int handleStart(void *params, char **output_str)
    start_params_t *start_params;
    spank_t spank;
    int site_argc, result, use_session;
+   uint32_t stepid;
    char **site_argv;
    spindle_args_t args = {0};
+   spank_err_t err;
 
    start_params = (start_params_t *) params;
    spank = start_params->spank;
@@ -539,6 +554,17 @@ static int handleStart(void *params, char **output_str)
    }
    
    if (args.opts & OPT_OFF) {
+      return 0;
+   }
+
+   err = get_stepid(spank, &stepid);
+   if (err != ESPANK_SUCCESS) {
+     slurm_error("ERROR: Spindle plugin error. Could not get step id.");
+     return -1;
+   }
+
+   if (use_session && (args.opts & OPT_RSHLAUNCH) && (stepid != 0)) {
+      slurm_spank_log("this is an rshlaunch session but not first stepid, not starting spindle");
       return 0;
    }
    
@@ -666,6 +692,7 @@ static unique_id_t getUniqueID(spank_t spank, int session_enabled)
       combined = jobid;
    }
    sdprintf(2, "Computed unique_id for session as %llu, session_enabled = %d\n", (unsigned long long) combined, session_enabled);
+   slurm_spank_log("Computed unique_id for session as %llu, session_enabled = %d", (unsigned long long) combined, session_enabled);
    return combined;
 }
 
@@ -779,15 +806,17 @@ static int get_num_hosts_job(spank_t spank)
    int result;
    spank_err_t err;
 
-   num_hosts_str = getenv("SLURM_JOB_NUM_NODES");
+   num_hosts_str = readSpankEnv(spank, "SLURM_JOB_NUM_NODES");
    if (num_hosts_str) {
       result = atoi(num_hosts_str);
+      free(num_hosts_str);
       if (result > 0)
          return (int) result;
    }
-   num_hosts_str = getenv("SLURM_NNODES");
+   num_hosts_str = readSpankEnv(spank, "SLURM_NNODES");
    if (num_hosts_str) {
       result = atoi(num_hosts_str);
+      free(num_hosts_str);
       if (result > 0)
          return (int) result;
    }
@@ -802,7 +831,7 @@ static int get_num_hosts_step(spank_t spank)
    char *num_hosts_str;
    int result;
    
-   num_hosts_str = getenv("SLURM_STEP_NUM_NODES");
+   num_hosts_str = readSpankEnv(spank, "SLURM_STEP_NUM_NODES");
    if (num_hosts_str) {
       result = atoi(num_hosts_str);
       if (result > 0)
@@ -954,13 +983,14 @@ static int get_spindle_args(spank_t spank, spindle_args_t *params)
 
 static int launch_spindle(spank_t spank, spindle_args_t *params)
 {
-   char **hostlist = NULL, **hostaddrlist = NULL;
+   char **hostlist = NULL, **hostlist_job = NULL, **hostlist_fe = NULL, **hostaddrlist = NULL;
    int result;
    int is_fe_host = 0;
    int is_be_leader = 0;
-   unsigned int i, num_hosts;
+   unsigned int i, num_hosts, num_hosts_job, num_hosts_fe;
    int num_hosts_result;
    int launch_result = -1;
+   int rsh_session_launch = 0;
 
    num_hosts_result = get_num_hosts(spank);
    if (num_hosts_result == -1)
@@ -979,6 +1009,7 @@ static int launch_spindle(spank_t spank, spindle_args_t *params)
    if (is_fe_host == -1) 
       goto done;
 
+
    sdprintf(1, "is_fe_host = %d, is_be_leader = %d\n", (int) is_fe_host, (int) is_be_leader);
    
    if (is_be_leader && !(params->opts & OPT_RSHLAUNCH)) {
@@ -990,13 +1021,47 @@ static int launch_spindle(spank_t spank, spindle_args_t *params)
    }
 
    if (is_fe_host && is_be_leader) {
+      slurm_spank_log("I'm both FE host and BE leader");
+      rsh_session_launch = (params->opts & OPT_RSHLAUNCH) && (params->opts & OPT_SESSION);
+      if (rsh_session_launch) {
+          slurm_spank_log("rsh session launch, should use job nodes not step nodes!");
+          slurm_spank_log("begin slurm launch env vars");
+          print_env();
+          slurm_spank_log("end slurm launch env vars");
+          num_hosts_result = get_num_hosts_job(spank);
+          if (num_hosts_result == -1) {
+              slurm_spank_log("failed to get num hosts for job");
+              goto done;               
+          }
+          num_hosts_job = (unsigned int) num_hosts_result;
+          slurm_spank_log("num_hosts_job: %d", num_hosts_job);
+          hostlist_job = get_hostlist_job(spank, num_hosts_job);
+          if (!hostlist_job) {
+              slurm_spank_log("failed to get hosts for job");
+              goto done;
+          }
+          for(int n = 0; n < num_hosts_job; ++n) {
+              slurm_spank_log("hostlist_job[%d] = %s", n, hostlist_job[n]);
+          }
+          hostlist_fe = hostlist_job;
+          num_hosts_fe = num_hosts_job;
+      } else {
+          slurm_spank_log("not rsh session launch, using step nodes");
+          hostlist_fe = hostlist;
+          num_hosts_fe = num_hosts;
+      }
 #if defined(SINFO_BIN)
-      hostaddrlist = getHostAddrSinfo(num_hosts, hostlist);
+      slurm_spank_log("doing sinfo launch");
+      slurm_spank_log("num_hosts_fe: %d", num_hosts_fe);
+      hostaddrlist = getHostAddrSinfo(num_hosts_fe, hostlist_fe);
+      for(int n = 0; n < num_hosts_fe; ++n) {
+         slurm_spank_log("hostlist_fe[%d] = %s", n, hostlist_fe[n]);
+      }
       if (!hostaddrlist)
 	     goto done;
       result = launchFE(hostaddrlist, params);
 #else
-      result = launchFE(hostlist, params);
+      result = launchFE(hostlist_fe, params);
 #endif
       if (result == -1)
          goto done;
@@ -1008,6 +1073,10 @@ static int launch_spindle(spank_t spank, spindle_args_t *params)
    if (hostlist) {
       for (i = 0; i < num_hosts; i++) free(hostlist[i]);
       free(hostlist);
+   }
+   if (hostlist_job) {
+      for (i = 0; i < num_hosts_job; i++) free(hostlist_job[i]);
+      free(hostlist_job);
    }
    if (hostaddrlist) {
       for (i = 0; i < num_hosts; i++) free(hostaddrlist[i]);
