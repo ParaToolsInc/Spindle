@@ -51,8 +51,6 @@ SPINDLE_EXPORT int slurm_spank_init(spank_t spank, int ac, char *argv[]);
 SPINDLE_EXPORT int slurm_spank_init_post_opt(spank_t spank, int ac, char *argv[]);
 SPINDLE_EXPORT int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[]);
 SPINDLE_EXPORT int slurm_spank_exit(spank_t spank, int site_argc, char *site_argv[]);
-
-
 SPINDLE_EXPORT int slurm_spank_job_prolog(spank_t spank, int ac, char *argv[]);
 SPINDLE_EXPORT int slurm_spank_job_epilog(spank_t spank, int ac, char *argv[]);
 
@@ -109,9 +107,9 @@ static const char *user_options = NULL;
 static int enable_spindle = 0;
 static int start_session = 0;
 
-extern char **environ;
 extern char *parse_location(char *loc, number_t number);
 
+// CLI options for srun
 struct spank_option spank_options[] =
 {
    { "spindle", "[spindle options]",
@@ -121,6 +119,7 @@ struct spank_option spank_options[] =
    SPANK_OPTIONS_TABLE_END
 };
 
+// CLI options for salloc and sbatch
 struct spank_option session_option =
 {
    "spindle-session", NULL, 
@@ -166,15 +165,6 @@ static int should_use_session(spank_t spank) {
    return 0;
 }
 
-extern char **environ; // TODO get rid of this
-
-void print_env(void) // TODO get rid of this
-{
-   for (char **env = environ; *env != NULL; env++) {
-       slurm_spank_log("\t%s", *env);
-   }
-}
-
 int slurm_spank_init(spank_t spank, int ac, char *argv[]) {
    spank_context_t context;
    context = spank_context();
@@ -203,6 +193,15 @@ int slurm_spank_init_post_opt(spank_t spank, int ac, char *argv[]) {
    return 0;
 }
 
+/* Environment Forwarding
+ * 
+ * There are three different sets of env vars:
+ *    - Standard env vars (getenv/setenv) in local and allocator context
+ *    - Job env vars (spank_getenv/spank_setenv) in remote context
+ *    - Job control env vars (spank_job_control_getenv/spank_job_control_setenv) in job control context
+ * Spindle itself will get env vars using getenv/setenv, so in remote and job control
+ * contexts, we have to read from the Slurm-specific context and setenv.
+ */ 
 static int forward_environment_to_job_control(spank_t spank) 
 {
    spank_err_t err;
@@ -225,7 +224,6 @@ static int forward_environment_to_job_control(spank_t spank)
        err = spank_job_control_setenv(spank, "SPINDLE_TEST", envVal, 1);
        if (err != ESPANK_SUCCESS) return -1;
    }
-
    envVal = getenv("TMPDIR");
    if (envVal) {
        err = spank_job_control_setenv(spank, "TMPDIR", envVal, 1);
@@ -235,6 +233,9 @@ static int forward_environment_to_job_control(spank_t spank)
        if (err != ESPANK_SUCCESS) return -1;
    }
 
+   /* In the job control context, the SLURM_JOB_NODELIST incorrectly
+    * contains the nodes of the STEP rather than the job, so we save
+    * a copy from local context, where we have the correct value. */
    envVal = getenv("SLURM_JOB_NODELIST");
    if (envVal) {
       err = spank_job_control_setenv(spank, "SPINDLE_JOB_NODELIST", envVal, 1);
@@ -244,6 +245,9 @@ static int forward_environment_to_job_control(spank_t spank)
    return 0;
 }    
 
+/* SPINDLE_DEBUG, SPINDLE_TEST, and TMPDIR are used in initializing
+ * debug logging. Thus, these env vars need to be forwarded early,
+ * before any debug logging can occur. */
 static int forward_environment_to_slurmstepd(spank_t spank) 
 {
    char *envVal;
@@ -269,6 +273,9 @@ static int forward_environment_to_slurmstepd(spank_t spank)
    return 0;
 }
 
+/* spank_job_control_setenv always prepends "SPANK_"
+ * to the env var name. Read the "SPANK_"-prefixed version
+ * and set the one Spindle expects. */
 static int handle_forwarded_environment(void) 
 {
    char * envVal;
@@ -291,7 +298,8 @@ static int handle_forwarded_environment(void)
    return 0;
 }
 
-
+/* local_user_init callback happens in srun after the step
+ * is ready to run but before it starts running. */
 int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[]) 
 {
    int result, use_session, num_hosts;
@@ -300,16 +308,14 @@ int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[])
    spank_err_t err;
    spindle_args_t params = {0};
    
+   /* It is only valid to call spank_job_control_setenv from local
+    * context, so we have to use this callback to forward env vars
+    * to job control. */
    result = forward_environment_to_job_control(spank);
    if (result == -1) {
       slurm_error("ERROR: Spindle plugin error. Unable to forward environment variables to job control.\n");
       goto done;
    }
-
-   slurm_spank_log("slurm_spank_local_user_init");
-   print_env();
-   slurm_spank_log("end slurm_spank_local_user_init env vars");
-
 
    use_session = should_use_session(spank); 
    if (!use_session)
@@ -321,8 +327,10 @@ int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[])
       return -1;
    }
    
+   /* For sessions without rshlaunch, session start happens in the prolog.
+    * For sessions with rshlaunch, session start happens in task_init.
+    * For rshlaunch, set SPINDLE_RSHLAUNCH in job control to signal prolog not to start session. */
    if (params.opts & OPT_RSHLAUNCH) {
-      slurm_spank_log("Skipping job-start srun because RSHLAUNCH is used"); //TODO make spindle debug msg ~nchaimov
       err = spank_job_control_setenv(spank, "SPINDLE_RSHLAUNCH", "1", 1);
       if (err != ESPANK_SUCCESS) {
          slurm_error("ERROR: Spindle plugin error. Could not set job control env var.");
@@ -331,26 +339,23 @@ int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[])
       goto done;
    }
    
+   /* For non-rshlaunch sessions, we have to force the prolog to run on every node.
+    * To do that, we do a dummy srun in the first step (step 0) on all nodes. */
    err = get_stepid(spank, &stepid);
    if (err != ESPANK_SUCCESS) {
      slurm_error("ERROR: Spindle plugin error. Could not get step id.");
      return -1;
    }
-   slurm_spank_log("slurm_spank_local_user_init: step id = %u", stepid); // TODO remove ~nchaimov
 
-   if (stepid != 0) {
-      slurm_spank_log("Skipping srun, not first step");
+   if (stepid != 0)
       goto done;
-   }
 
-   slurm_spank_log("Checking if already in session init"); // TODO remove ~nchaimov
-   
+   /* Guard against starting session more than once. */
    envVal = getenv("SPANK_SPINDLE_SESSION_INIT");
    if (envVal && strcmp(envVal, "1") == 0) 
       goto done;
-
-   slurm_spank_log("Setting inside session init");
    setenv("SPANK_SPINDLE_SESSION_INIT", "1", 1);
+
    num_hosts = get_num_hosts_job(spank);
    if (num_hosts == -1) {
       slurm_error("ERROR: Spindle plugin error. Unable to get number of hosts\n");
@@ -358,7 +363,7 @@ int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[])
       goto done;
    }
 
-   slurm_spank_log("Will try to srun on %d nodes", num_hosts);
+   /* Force prolog to run on all nodes. */
    result = srunAllNodes((unsigned int)num_hosts, "/bin/true");
 
   done:
@@ -366,29 +371,25 @@ int slurm_spank_local_user_init(spank_t spank, int ac, char *argv[])
 }
 
 
+/* job_prolog callback called on the compute node just before job
+ * start the first time a step runs on any given node within a job. */
 int slurm_spank_job_prolog(spank_t spank, int ac, char *argv[]) {
-   spank_context_t context; // TODO remove ~nchaimov
    uid_t userid;
    start_params_t start_params;
    spank_err_t err;
    int result, use_session;
    char *result_str, *work_dir, *envVal;
    
-   context = spank_context(); // TODO remove ~nchaimov
    handle_forwarded_environment();
    use_session = should_use_session(spank);
 
-   if (!use_session) {
-      slurm_spank_log("Not a session, job prolog exiting...");
+   if (!use_session) 
       return 0;
-   }
-   slurm_spank_log("This is a session");
+   
    
    envVal = getenv("SPANK_SPINDLE_RSHLAUNCH");
-   if (envVal && strcmp(envVal, "1") == 0) {
-      slurm_spank_log("rshlaunch used, job prolog exiting...");
+   if (envVal && strcmp(envVal, "1") == 0) 
       return 0;
-   }
 
    // The prolog starts in the user's home directory.
    // Change to $SLURM_JOB_WORK_DIR so logs go to right place.
@@ -417,6 +418,9 @@ int slurm_spank_job_prolog(spank_t spank, int ac, char *argv[]) {
    return 0;
 }
 
+/* job_epilog called on every compute node when allocation ends, 
+ * regardless of whether any step ever ran on that node and
+ * even if the prolog never ran. */
 int slurm_spank_job_epilog(spank_t spank, int ac, char *argv[]) {
    int result, use_session;
    char *result_str;
@@ -430,6 +434,7 @@ int slurm_spank_job_epilog(spank_t spank, int ac, char *argv[]) {
       return 0;
 
    // If session, shutdown BE and FE here.
+   
    err = spank_get_item(spank, S_JOB_UID, &userid);
    if (err != ESPANK_SUCCESS) {
       slurm_error("ERROR: Spindle plugin error.  Could not get uid in epilog exit\n");
@@ -447,10 +452,11 @@ int slurm_spank_job_epilog(spank_t spank, int ac, char *argv[]) {
       return -1;
    }
    
-   // TODO last-chance opportunity to stop Spindle processes
    return 0;
 }
 
+/* task_init callback called on the compute nodes for every task
+ * just before the application is exec'ed */
 int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
 {
    spank_context_t context;
@@ -489,11 +495,11 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
    // will spawn the log daemon so that SPINDLE_DEBUG and SPINDLE_TEST
    // are set appropriately.
    forward_environment_to_slurmstepd(spank);
-
    sdprintf(1, "Beginning spindle plugin\n");
+   // Now do the rest of the environment forwarding after logging is initialized
    push_env(spank, &env);
-   use_session = should_use_session(spank);
 
+   use_session = should_use_session(spank);
    result = process_spindle_args(spank, site_argc, site_argv, &params, NULL, NULL, use_session);
    if (result == -1) {
       sdprintf(1, "Error processesing spindle arguments.  Aborting spindle\n");
@@ -503,7 +509,6 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
    if (params.opts & OPT_OFF) {
      return 0;
    }
-
 
    /* When using a session without RSHLAUNCH, handle start in job prolog, not here. */
    if ((!use_session) || (params.opts & OPT_RSHLAUNCH)) {
@@ -563,10 +568,9 @@ static int handleStart(void *params, char **output_str)
      return -1;
    }
 
-   if (use_session && (args.opts & OPT_RSHLAUNCH) && (stepid != 0)) {
-      slurm_spank_log("this is an rshlaunch session but not first stepid, not starting spindle");
+   // Only initialize a session once
+   if (use_session && (args.opts & OPT_RSHLAUNCH) && (stepid != 0))
       return 0;
-   }
    
    result = launch_spindle(spank, &args);
    if (result == -1) {
@@ -576,6 +580,7 @@ static int handleStart(void *params, char **output_str)
    return 0;
 }
 
+/* task_exit is called on compute node for each task just before exit */
 int slurm_spank_task_exit(spank_t spank, int site_argc, char *site_argv[])
 {
    spank_context_t context;
@@ -622,7 +627,7 @@ int slurm_spank_task_exit(spank_t spank, int site_argc, char *site_argv[])
    pop_env(saved_env);
    
    if (result == -1) {
-      slurm_error("Failed to run handleExit.  Spindle may not shutdown properly\n");
+      slurm_error("ERROR: Failed to run handleExit.  Spindle may not shutdown properly\n");
       return -1;
    }
    return 0;
@@ -674,14 +679,14 @@ static unique_id_t getUniqueID(spank_t spank, int session_enabled)
    
    err = get_jobid(spank, &jobid);
    if (err != ESPANK_SUCCESS) {
-       slurm_error("Could not setup spindle:  Could not get SLURM_JOB_ID");
+       slurm_error("ERROR: Could not setup spindle:  Could not get SLURM_JOB_ID\n");
        return 0;
    }
 
    if (!session_enabled) {
       err = get_stepid(spank, &stepid);
       if (err != ESPANK_SUCCESS) {
-         slurm_error("Could not setup spindle:  Could not get SLURM_STEP_ID");
+         slurm_error("ERROR: Could not setup spindle:  Could not get SLURM_STEP_ID\n");
          return 0;
       }
 
@@ -692,7 +697,6 @@ static unique_id_t getUniqueID(spank_t spank, int session_enabled)
       combined = jobid;
    }
    sdprintf(2, "Computed unique_id for session as %llu, session_enabled = %d\n", (unsigned long long) combined, session_enabled);
-   slurm_spank_log("Computed unique_id for session as %llu, session_enabled = %d", (unsigned long long) combined, session_enabled);
    return combined;
 }
 
@@ -990,7 +994,6 @@ static int launch_spindle(spank_t spank, spindle_args_t *params)
    unsigned int i, num_hosts, num_hosts_job, num_hosts_fe;
    int num_hosts_result;
    int launch_result = -1;
-   int rsh_session_launch = 0;
 
    num_hosts_result = get_num_hosts(spank);
    if (num_hosts_result == -1)
@@ -1012,51 +1015,38 @@ static int launch_spindle(spank_t spank, spindle_args_t *params)
 
    sdprintf(1, "is_fe_host = %d, is_be_leader = %d\n", (int) is_fe_host, (int) is_be_leader);
    
+   // Don't launch BE when using rshlaunch; FE will launch BEs
    if (is_be_leader && !(params->opts & OPT_RSHLAUNCH)) {
       result = launchBE(spank, params);
       if (result == -1)
          goto done;
-   } else {
-       slurm_spank_log("Not launching BE because OPT_RSHLAUNCH is set.");
    }
 
    if (is_fe_host && is_be_leader) {
-      slurm_spank_log("I'm both FE host and BE leader");
-      rsh_session_launch = (params->opts & OPT_RSHLAUNCH) && (params->opts & OPT_SESSION);
-      if (rsh_session_launch) {
-          slurm_spank_log("rsh session launch, should use job nodes not step nodes!");
-          slurm_spank_log("begin slurm launch env vars");
-          print_env();
-          slurm_spank_log("end slurm launch env vars");
+      // When starting a session with rshlaunch, we need to start
+      // on all the nodes of the *whole job*, not just the nodes of 
+      // this particular step.
+      if ((params->opts & OPT_RSHLAUNCH) && (params->opts & OPT_SESSION)) {
           num_hosts_result = get_num_hosts_job(spank);
           if (num_hosts_result == -1) {
-              slurm_spank_log("failed to get num hosts for job");
+              slurm_error("ERROR: failed to get num hosts for job");
               goto done;               
           }
           num_hosts_job = (unsigned int) num_hosts_result;
-          slurm_spank_log("num_hosts_job: %d", num_hosts_job);
           hostlist_job = get_hostlist_job(spank, num_hosts_job);
           if (!hostlist_job) {
-              slurm_spank_log("failed to get hosts for job");
+              slurm_error("ERROR: failed to get hosts for job");
               goto done;
-          }
-          for(int n = 0; n < num_hosts_job; ++n) {
-              slurm_spank_log("hostlist_job[%d] = %s", n, hostlist_job[n]);
           }
           hostlist_fe = hostlist_job;
           num_hosts_fe = num_hosts_job;
       } else {
-          slurm_spank_log("not rsh session launch, using step nodes");
+          // Otherwise, start with the nodes of the step.
           hostlist_fe = hostlist;
           num_hosts_fe = num_hosts;
       }
 #if defined(SINFO_BIN)
-      slurm_spank_log("doing sinfo launch");
-      slurm_spank_log("num_hosts_fe: %d", num_hosts_fe);
       hostaddrlist = getHostAddrSinfo(num_hosts_fe, hostlist_fe);
-      for(int n = 0; n < num_hosts_fe; ++n) {
-         slurm_spank_log("hostlist_fe[%d] = %s", n, hostlist_fe[n]);
-      }
       if (!hostaddrlist)
 	     goto done;
       result = launchFE(hostaddrlist, params);
@@ -1086,6 +1076,7 @@ static int launch_spindle(spank_t spank, spindle_args_t *params)
    return launch_result;
 }
 
+/* Handles arguments to srun */
 static int spindle_options(int val, const char *optarg, int remote)
 {
    enable_spindle = 1;
@@ -1094,6 +1085,7 @@ static int spindle_options(int val, const char *optarg, int remote)
    return 0;
 }
 
+/* Handles arguments to salloc and sbatch */
 static int spindle_session_options(int val, const char *optarg, int remote)
 {
    start_session = 1;
