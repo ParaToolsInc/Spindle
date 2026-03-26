@@ -48,7 +48,6 @@ int srunAllNodes(unsigned int num_nodes, const char *command)
       // In child
       char n[12];
       snprintf(n, sizeof(n), "%u", num_nodes);
-      fprintf(stderr, "Going to srun on %s nodes\n", n);
       execlp("srun",
              "srun", 
              "--nodes", n,

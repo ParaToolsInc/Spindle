@@ -11,6 +11,10 @@ export SPINDLE=SPINDLE_EXEC
 export PATH=$PATH:.
 
 if [ $1 == --start-session ] ; then
+    # With SPANK plugin, sessions are started by argument to salloc/sbatch instead
+    if [ "x$TEST_RM" == "xslurm-plugin" ] ; then
+        exit 0
+    fi
     export SPINDLEID=`$SPINDLE --start-session --level=high`
     if [ x$SPINDLEID == x ]; then
         echo ANONYMOUS_SESSION
@@ -20,6 +24,9 @@ if [ $1 == --start-session ] ; then
     exit 0
 fi
 if [ $1 == --end-session ] ; then
+    if [ "x$TEST_RM" == "xslurm-plugin" ] ; then
+        exit 0
+    fi
     if [ x$2 == xANONYMOUS_SESSION ] ; then
         $SPINDLE --end-session
     else
@@ -59,11 +66,14 @@ export SPINDLE_OPTS="--numa"
 fi
 
 if [ $2 == --session ] ; then
-  if [ x$SESSION_ID == x ] ; then
-    export SESSION_ID=`$SPINDLE --start-session`
-    export STARTED_SPINDLE_SESSION=true
+  # With SPANK plugin, we run in session if the allocation has a session
+  if [ "x$TEST_RM" != "xslurm-plugin" ] ; then
+    if [ x$SESSION_ID == x ] ; then
+      export SESSION_ID=`$SPINDLE --start-session`
+      export STARTED_SPINDLE_SESSION=true
+    fi
+    export SPINDLE_OPTS="--run-in-session $SESSION_ID"
   fi
-  export SPINDLE_OPTS="--run-in-session $SESSION_ID"
 fi
 
 export SPINDLE_BLUEGENE="BLUEGENE_TEST"

@@ -6,6 +6,16 @@ export TEST_RM="TEST_RESOURCE_MANAGER"
 export GLOBAL_RESULT=0
 CHECK_RETCODE() { if [[ $? != 0 ]]; then export GLOBAL_RESULT=-1; fi }
 
+# For slurm-plugin, whether we use a session is determined by the allocation we run in.
+# Run only the non-session tests if this allocation doesn't use a session.
+# Run only the session tests if this allocation uses a session.
+SKIP_NONSESSION=false
+if test "x$TEST_RM" == "xslurm-plugin" && test "x$SPANK_SPINDLE_USE_SESSION" != "x"; then
+    SKIP_NONSESSION=true
+fi
+
+if test "x$SKIP_NONSESSION" != "xtrue"; then
+
 ./run_driver --dependency --push
 CHECK_RETCODE
 ./run_driver --dlopen --push
@@ -129,7 +139,17 @@ CHECK_RETCODE
 ./run_driver --spindleapi --preload
 CHECK_RETCODE
 
-if test "x$TEST_RM" != "xserial"; then
+fi # SKIP_NONSESSION
+
+SKIP_SESSION=false
+if test "x$TEST_RM" == "xserial"; then
+    SKIP_SESSION=true
+fi
+if test "x$TEST_RM" == "xslurm-plugin" && test "x$SPANK_SPINDLE_USE_SESSION" == "x"; then
+    SKIP_SESSION=true
+fi
+
+if test "x$SKIP_SESSION" != "xtrue"; then
 export SESSION_ID=`./run_driver --start-session`
 ./run_driver --dependency --session
 CHECK_RETCODE

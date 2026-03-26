@@ -213,6 +213,11 @@ jobs:
         run: |
           docker exec slurm-plugin-head bash -c 'cd Spindle-build/testsuite && salloc -n${workers} -N${workers} ./runTests ${workers}'
 
+      - name: Run spindle-slurm-plugin-ubuntu session testsuite
+        id: slurm-ubuntu-testsuite
+        run: |
+          docker exec slurm-plugin-head bash -c 'cd Spindle-build/testsuite && salloc -n${workers} -N${workers} --spindle-session ./runTests ${workers}'
+
       - name: Bring spindle-slurm-plugin-ubuntu down
         id: slurm-ubuntu-down
         if: ${{ always() }}

@@ -562,15 +562,15 @@ static int handleStart(void *params, char **output_str)
       return 0;
    }
 
-   err = get_stepid(spank, &stepid);
-   if (err != ESPANK_SUCCESS) {
-     slurm_error("ERROR: Spindle plugin error. Could not get step id.");
-     return -1;
-   }
-
    // Only initialize a session once
-   if (use_session && (args.opts & OPT_RSHLAUNCH) && (stepid != 0))
+   if (use_session && (args.opts & OPT_RSHLAUNCH) && (stepid != 0)) {
+      err = get_stepid(spank, &stepid);
+      if (err != ESPANK_SUCCESS) {
+          slurm_error("ERROR: Spindle plugin error. Could not get step id.");
+          return -1;
+      }
       return 0;
+   }
    
    result = launch_spindle(spank, &args);
    if (result == -1) {
@@ -632,6 +632,7 @@ int slurm_spank_task_exit(spank_t spank, int site_argc, char *site_argv[])
    }
    return 0;
 }
+
 
 static spank_err_t get_stepid(spank_t spank, uint32_t *stepid)
 {
