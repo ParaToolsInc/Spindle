@@ -12810,10 +12810,11 @@ case $sysconfdir in #(
 esac
 
 BROKEN_SRUN=0
+HAVE_EXT_LAUNCHER=0
 bad_srun_major=20
 bad_srun_minor=11
-good_srun_major=0
-good_srun_minor=0
+good_srun_major=23
+good_srun_minor=11
 if test "x$ENABLE_SLURM" == "xtrue"; then
   # Extract the first word of ""srun"", so it can be a program name with args.
 set dummy "srun"; ac_word=$2
@@ -12866,8 +12867,9 @@ $as_echo_n "checking slurm version for compatibility... " >&6; }
   srun_minor=`echo $srun_version | cut -d . -f 2`
   srun_point=`echo $srun_version | cut -d . -f 3`
   if ( [ "$srun_major" == "$bad_srun_major" ] && [ $srun_minor -ge $bad_srun_minor ] ) || [ $srun_major -gt $bad_srun_major ] ; then BROKEN_SRUN=1; fi
-  if test "x$good_srun_major" != "x0"; then
-    if ( [ "$srun_major" == "$good_srun_major" ] && [ $srun_minor -ge $good_srun_minor ] ) || [ $srun_major -gt $good_srun_major ] ; then BROKEN_SRUN=0; fi
+  if ( [ "$srun_major" == "$good_srun_major" ] && [ $srun_minor -ge $good_srun_minor ] ) || [ $srun_major -gt $good_srun_major ] ; then
+    HAVE_EXT_LAUNCHER=1
+    BROKEN_SRUN=0
   fi
 
   if test "x$BROKEN_SRUN" == "x1"; then
@@ -12908,7 +12910,12 @@ _ACEOF
 fi
 
 cat >>confdefs.h <<_ACEOF
-#define BROKEN_SRUN 1
+#define BROKEN_SRUN $BROKEN_SRUN
+_ACEOF
+
+
+cat >>confdefs.h <<_ACEOF
+#define HAVE_SRUN_EXTERNAL_LAUNCHER $HAVE_EXT_LAUNCHER
 _ACEOF
 
 

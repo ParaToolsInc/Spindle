@@ -45,6 +45,9 @@
 /* Define to 1 if you have the <memory.h> header file. */
 #undef HAVE_MEMORY_H
 
+/* Whether srun supports --external-launcher */
+#undef HAVE_SRUN_EXTERNAL_LAUNCHER
+
 /* Define to 1 if you have the <stdint.h> header file. */
 #undef HAVE_STDINT_H
 
