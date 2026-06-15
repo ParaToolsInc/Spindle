@@ -35,6 +35,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "stat_cache.h"
 #include "global_name.h"
 #include "ldcs_audit_server_handlers.h"
+#include "ldcs_audit_server_crash_handler.h"
 #include "ldcs_audit_server_requestors.h"
 #include "spindle_launch.h"
 #include "pathfn.h"
@@ -1896,6 +1897,8 @@ int handle_client_message(ldcs_process_data_t *procdata, int nc, ldcs_message_t 
          return handle_client_procmaps_msg(procdata, nc, msg);
       case LDCS_MSG_PICKONE_REQ:
          return handle_client_pickone_msg(procdata, nc, msg);
+      case LDCS_MSG_CRASH_REPORT:
+         return handle_client_crash_report(procdata, nc, msg);
       case LDCS_MSG_END:
          return handle_client_end(procdata, nc);
       case LDCS_MSG_CHOSEN_CACHEPATH_REQUEST:
@@ -1999,6 +2002,10 @@ int handle_server_message(ldcs_process_data_t *procdata, node_peer_t peer, ldcs_
          return handle_alive_msg(procdata, msg);
       case LDCS_MSG_REQUEST_CACHEPATH_CONSENSUS:
          return handle_cachepath_consensus(procdata, msg);
+      case LDCS_MSG_CRASH_REPORT:
+         return handle_crash_report_recv(procdata, peer, msg);
+      case LDCS_MSG_CRASH_RESPONSE:
+         return handle_crash_response_recv(procdata, peer, msg);
       default:
          err_printf("Received unexpected message from node: %d\n", (int) msg->header.type);
          assert(0);
