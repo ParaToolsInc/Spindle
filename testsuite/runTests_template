@@ -31,6 +31,11 @@ run_test ./run_driver --serial ./interpreter_test
 
 run_test ./run_driver --serial ./exec_shell
 
+# With SPINDLE_SERIAL_TESTS_ONLY set, stop after the serial tests.  They run in
+# seconds, so a stress loop gets far more iterations per run when hunting the
+# shutdown-time SIGPIPE failure.
+if test "x$SPINDLE_SERIAL_TESTS_ONLY" == "x"; then
+
 # For slurm-plugin, whether we use a session is determined by the allocation we run in.
 # Run only the non-session tests if this allocation doesn't use a session.
 # Run only the session tests if this allocation uses a session.
@@ -140,6 +145,10 @@ echo Skipping: ./run_driver --partial --session
 echo Skipping: ./run_driver --ldpreload --session
 echo Skipping: ./run_driver --spindleapi --session
 fi
+
+else
+echo "SPINDLE_SERIAL_TESTS_ONLY set: skipping all non-serial tests"
+fi # SPINDLE_SERIAL_TESTS_ONLY
 
 if [[ $GLOBAL_RESULT != 0 ]]; then
     echo SOME TESTS FAILED

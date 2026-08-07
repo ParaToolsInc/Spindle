@@ -28,6 +28,11 @@ on:
         required: false
         default: '1'
         type: string
+      serial_only:
+        description: 'Run only the four fast serial tests per iteration (use with a high iteration count)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -112,6 +117,7 @@ jobs:
           amp_env="$amp_env SPINDLE_DEBUG=${{ inputs.spindle_debug || '3' }}"
           [ -n '${{ inputs.close_delay_ms }}' ] && amp_env="$amp_env SPINDLE_DEBUG_CLOSE_DELAY_MS=${{ inputs.close_delay_ms }}"
           [ -n '${{ inputs.logd_timeout_sec }}' ] && amp_env="$amp_env SPINDLE_LOGD_TIMEOUT_SEC=${{ inputs.logd_timeout_sec }}"
+          [ '${{ inputs.serial_only }}' = 'true' ] && amp_env="$amp_env SPINDLE_SERIAL_TESTS_ONLY=1"
           echo "Amplification environment: $amp_env"
 
           for i in $(seq 1 "$iterations"); do
