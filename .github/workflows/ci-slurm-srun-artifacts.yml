@@ -77,17 +77,63 @@ jobs:
               docker exec "$node" bash -c 'rm -f Spindle-build/testsuite/spindle_output.*' || true
             done
 
-            if docker exec slurm-srun-head bash -c 'cd Spindle-build/testsuite && SPINDLE_DEBUG=3 salloc -n${workers} -N${workers} ./runTests ${workers}' 2>&1 | tee "runlogs/runTests-iter$i.log"; then
+            # Per-iteration timeout: a hang (observed in run 31220760317) is
+            # detected in ~25 minutes instead of consuming the whole job
+            # timeout, and the hung processes stay alive in the containers for
+            # the state-capture step below.
+            if timeout -k 30 1500 docker exec slurm-srun-head bash -c 'cd Spindle-build/testsuite && SPINDLE_DEBUG=3 salloc -n${workers} -N${workers} ./runTests ${workers}' 2>&1 | tee "runlogs/runTests-iter$i.log"; then
               echo "=== iteration $i passed ==="
               rm -f "runlogs/runTests-iter$i.log"
             else
               rc=$?
-              echo "=== iteration $i FAILED with exit status $rc ==="
+              if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+                echo "=== iteration $i HUNG (killed after timeout, exit $rc) ==="
+              else
+                echo "=== iteration $i FAILED with exit status $rc ==="
+              fi
               echo "failed_iteration=$i" >> "$GITHUB_OUTPUT"
               exit "$rc"
             fi
           done
           echo "All $iterations iterations passed without reproducing the failure."
+
+      - name: Capture live process state from containers
+        if: ${{ always() && steps.slurm-ubuntu-testsuite.outcome != 'success' }}
+        continue-on-error: true
+        run: |
+          # On a hang, the wedged processes are still running inside the
+          # containers (the iteration timeout only kills the docker exec
+          # client).  Record where every spindle/test process is stuck, and the
+          # spindle_logd coordination state in /tmp, before anything is torn
+          # down.
+          mkdir -p spindle-logs
+          for node in slurm-srun-head slurm-srun-node-1 slurm-srun-node-2 slurm-srun-node-3 slurm-srun-node-4; do
+            echo "::group::Process state on $node"
+            mkdir -p "spindle-logs/$node"
+            {
+              echo "===== ps auxfww"
+              docker exec "$node" ps auxfww
+              echo "===== /tmp contents (spindle_logd sockets, lock, reset flag)"
+              docker exec "$node" ls -la /tmp
+              echo "===== per-process kernel wait channels"
+              docker exec "$node" bash -c '
+                for pid in $(pgrep -f "spindle|test_driver|srun|salloc"); do
+                  [ -d /proc/$pid ] || continue
+                  echo "--- pid $pid: $(tr "\0" " " < /proc/$pid/cmdline 2>/dev/null)"
+                  echo "state: $(awk "/^State:/ {print \$2, \$3}" /proc/$pid/status 2>/dev/null)"
+                  echo "wchan: $(cat /proc/$pid/wchan 2>/dev/null)"
+                done'
+              echo "===== gdb backtraces (if gdb available)"
+              docker exec "$node" bash -c '
+                command -v gdb > /dev/null || { echo "gdb not installed"; exit 0; }
+                for pid in $(pgrep -f "spindle_be|spindle_bootstrap|test_driver|spindle_logd"); do
+                  echo "--- backtrace of pid $pid"
+                  timeout 30 gdb -p "$pid" --batch -ex "thread apply all bt" 2>&1 | tail -40
+                done'
+            } > "spindle-logs/$node/process-state.txt" 2>&1 || true
+            tail -5 "spindle-logs/$node/process-state.txt" || true
+            echo "::endgroup::"
+          done
 
       - name: Collect Spindle and Slurm logs from containers
         if: ${{ always() && steps.slurm-ubuntu-testsuite.outcome != 'success' }}
@@ -95,7 +141,7 @@ jobs:
         run: |
           failed=0
           mkdir -p spindle-logs
-          cp -r runlogs spindle-logs/ 2>/dev/null || true
+          cp -rv runlogs spindle-logs/ || echo "WARNING: no runlogs directory found"
 
           for node in slurm-srun-head slurm-srun-node-1 slurm-srun-node-2 slurm-srun-node-3 slurm-srun-node-4; do
             echo "::group::Collecting logs from $node"
