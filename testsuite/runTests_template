@@ -19,6 +19,18 @@ run_test() {
     fi
 }
 
+# The serial tests run first: they are the most sensitive reproducer of the
+# shutdown-time SIGPIPE failure under investigation (an FE death there is
+# reported directly as the test's exit status), so a failing iteration stops
+# within seconds instead of after the full suite.
+run_test ./run_driver --serial ./spindle_exec_test
+
+run_test ./run_driver --serial ./symbind_test
+
+run_test ./run_driver --serial ./interpreter_test
+
+run_test ./run_driver --serial ./exec_shell
+
 # For slurm-plugin, whether we use a session is determined by the allocation we run in.
 # Run only the non-session tests if this allocation doesn't use a session.
 # Run only the session tests if this allocation uses a session.
@@ -128,14 +140,6 @@ echo Skipping: ./run_driver --partial --session
 echo Skipping: ./run_driver --ldpreload --session
 echo Skipping: ./run_driver --spindleapi --session
 fi
-
-run_test ./run_driver --serial ./spindle_exec_test
-
-run_test ./run_driver --serial ./symbind_test
-
-run_test ./run_driver --serial ./interpreter_test
-
-run_test ./run_driver --serial ./exec_shell
 
 if [[ $GLOBAL_RESULT != 0 ]]; then
     echo SOME TESTS FAILED

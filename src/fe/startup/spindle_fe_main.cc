@@ -26,6 +26,8 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <fcntl.h>
 #include <string>
 #include <errno.h>
+#include <signal.h>
+#include <execinfo.h>
 
 #include "ldcs_api.h"
 #include "config.h"
@@ -88,9 +90,27 @@ Launcher *newLauncher(spindle_args_t *params, ConfigMap &config)
    return NULL;
 }
 
+/* TEMPORARY (debug branch only, do not merge): identify the write that takes
+   the shutdown-time SIGPIPE silently killing the FE with exit 141
+   (plans/MULTIPLE_COMMPATH_DEBUGGING.md addendum 3).  Prints a backtrace to
+   stderr, then re-raises so the exit status still shows the original
+   failure. */
+static void on_sigpipe_trace(int sig)
+{
+   void *trace[64];
+   static const char msg[] = "SPINDLE-DEBUG: FE caught SIGPIPE, backtrace follows:\n";
+   (void)! write(2, msg, sizeof(msg)-1);
+   int depth = backtrace(trace, 64);
+   backtrace_symbols_fd(trace, depth, 2);
+   signal(sig, SIG_DFL);
+   raise(sig);
+}
+
 int main(int argc, char *argv[])
 {
    bool result;
+   if (getenv("SPINDLE_DEBUG_SIGPIPE_TRACE"))
+      signal(SIGPIPE, on_sigpipe_trace);
    setupLogging(argc, argv);
 
    ConfigMap config("[Spindle Config]");

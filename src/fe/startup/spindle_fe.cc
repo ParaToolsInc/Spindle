@@ -30,6 +30,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <pwd.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <unistd.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -457,7 +458,16 @@ int spindleCloseFE(spindle_args_t *params)
    LOGGING_INIT(const_cast<char *>("FE"));
 
    debug_printf("Called spindleCloseFE\n");
-   
+
+   /* TEMPORARY (debug branch only, do not merge): optional delay to widen the
+      race window where daemons exit bottom-up before the FE writes its EXIT
+      message (plans/MULTIPLE_COMMPATH_DEBUGGING.md addendum 3). */
+   char *close_delay_s = getenv("SPINDLE_DEBUG_CLOSE_DELAY_MS");
+   if (close_delay_s) {
+      debug_printf("Delaying FE close by %s ms\n", close_delay_s);
+      usleep(atoi(close_delay_s) * 1000);
+   }
+
    ldcs_audit_server_fe_md_close(md_data_ptr);
 
    if (OPT_GET_SEC(params->opts) == OPT_SEC_KEYFILE) {

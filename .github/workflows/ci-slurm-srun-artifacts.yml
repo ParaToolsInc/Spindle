@@ -8,6 +8,26 @@ on:
         required: false
         default: '10'
         type: string
+      cpuset:
+        description: 'Host CPUs shared by ALL containers (e.g. 0-1 to oversubscribe; empty = no constraint)'
+        required: false
+        default: '0-1'
+        type: string
+      spindle_debug:
+        description: 'SPINDLE_DEBUG level (0 mimics regular CI timing; 3 = full logs)'
+        required: false
+        default: '3'
+        type: string
+      close_delay_ms:
+        description: 'SPINDLE_DEBUG_CLOSE_DELAY_MS: FE shutdown delay to widen the SIGPIPE race (empty = off)'
+        required: false
+        default: '2000'
+        type: string
+      logd_timeout_sec:
+        description: 'SPINDLE_LOGD_TIMEOUT_SEC: log daemon idle timeout (default in code is 10)'
+        required: false
+        default: '1'
+        type: string
 
 permissions:
   contents: read
@@ -59,6 +79,22 @@ jobs:
         run: |
           docker exec slurm-srun-head bash -c 'munge -n | unmunge'
 
+      - name: Constrain containers to a shared cpuset
+        id: slurm-ubuntu-constrain
+        run: |
+          cpuset='${{ inputs.cpuset }}'
+          if [ -z "$cpuset" ]; then
+            echo "No cpuset requested; containers keep all host CPUs."
+            exit 0
+          fi
+          # Pinning every container to the same small cpuset makes them compete
+          # for cores like the whole stack does on a constrained runner,
+          # widening the shutdown races under investigation.
+          docker update --cpuset-cpus "$cpuset" $(docker ps --format '{{.Names}}')
+          docker ps --format '{{.Names}}' | while read -r c; do
+            echo "$c: cpuset=$(docker inspect -f '{{.HostConfig.CpusetCpus}}' "$c")"
+          done
+
       - name: Run spindle-slurm-srun-ubuntu testsuite until failure
         id: slurm-ubuntu-testsuite
         run: |
@@ -67,6 +103,16 @@ jobs:
           iterations="${iterations:-1}"
           nodes="slurm-srun-head slurm-srun-node-1 slurm-srun-node-2 slurm-srun-node-3 slurm-srun-node-4"
           mkdir -p runlogs
+
+          # Race-amplification knobs (see plans/MULTIPLE_COMMPATH_DEBUGGING.md).
+          # SPINDLE_DEBUG_SIGPIPE_TRACE makes an FE/BE SIGPIPE death print a
+          # backtrace instead of dying silently; the others widen the race
+          # windows.  All are env-gated debug-branch-only code.
+          amp_env="SPINDLE_DEBUG_SIGPIPE_TRACE=1"
+          amp_env="$amp_env SPINDLE_DEBUG=${{ inputs.spindle_debug || '3' }}"
+          [ -n '${{ inputs.close_delay_ms }}' ] && amp_env="$amp_env SPINDLE_DEBUG_CLOSE_DELAY_MS=${{ inputs.close_delay_ms }}"
+          [ -n '${{ inputs.logd_timeout_sec }}' ] && amp_env="$amp_env SPINDLE_LOGD_TIMEOUT_SEC=${{ inputs.logd_timeout_sec }}"
+          echo "Amplification environment: $amp_env"
 
           for i in $(seq 1 "$iterations"); do
             echo "=== testsuite iteration $i of $iterations ==="
@@ -81,7 +127,7 @@ jobs:
             # detected in ~25 minutes instead of consuming the whole job
             # timeout, and the hung processes stay alive in the containers for
             # the state-capture step below.
-            if timeout -k 30 1500 docker exec slurm-srun-head bash -c 'cd Spindle-build/testsuite && SPINDLE_DEBUG=3 salloc -n${workers} -N${workers} ./runTests ${workers}' 2>&1 | tee "runlogs/runTests-iter$i.log"; then
+            if timeout -k 30 1500 docker exec slurm-srun-head bash -c "cd Spindle-build/testsuite && env $amp_env salloc -n\${workers} -N\${workers} ./runTests \${workers}" 2>&1 | tee "runlogs/runTests-iter$i.log"; then
               echo "=== iteration $i passed ==="
               rm -f "runlogs/runTests-iter$i.log"
             else

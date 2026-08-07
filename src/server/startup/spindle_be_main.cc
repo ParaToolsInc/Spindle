@@ -17,6 +17,8 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <unistd.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <signal.h>
+#include <execinfo.h>
 #include "spindle_debug.h"
 #include "spindle_launch.h"
 #include "ldcs_api.h"
@@ -49,9 +51,27 @@ static int port;
 static int num_ports;
 static unique_id_t unique_id;
 
+/* TEMPORARY (debug branch only, do not merge): identify the write that takes
+   a shutdown-time SIGPIPE in the BE server (see
+   plans/MULTIPLE_COMMPATH_DEBUGGING.md addendum 3).  Prints a backtrace to
+   stderr, then re-raises so the exit status still shows the original
+   failure. */
+static void on_sigpipe_trace(int sig)
+{
+   void *trace[64];
+   static const char msg[] = "SPINDLE-DEBUG: BE caught SIGPIPE, backtrace follows:\n";
+   (void)! write(2, msg, sizeof(msg)-1);
+   int depth = backtrace(trace, 64);
+   backtrace_symbols_fd(trace, depth, 2);
+   signal(sig, SIG_DFL);
+   raise(sig);
+}
+
 int main(int argc, char *argv[])
 {
    int  result;
+   if (getenv("SPINDLE_DEBUG_SIGPIPE_TRACE"))
+      signal(SIGPIPE, on_sigpipe_trace);
    setupLogging(argc, argv);
 
    debug_printf("Spindle Server Cmdline: ");

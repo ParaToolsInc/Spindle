@@ -38,6 +38,10 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 
 //Seconds to live without a child
 #define TIMEOUT 10
+/* TEMPORARY (debug branch only, do not merge): overridable via
+   SPINDLE_LOGD_TIMEOUT_SEC to amplify the daemon-handoff races
+   (plans/MULTIPLE_COMMPATH_DEBUGGING.md addendum 2). */
+static int idle_timeout = TIMEOUT;
 
 std::string tmpdir;
 std::string debug_fname;
@@ -444,7 +448,7 @@ private:
          }
          
          struct timeval timeout;
-         timeout.tv_sec = TIMEOUT;
+         timeout.tv_sec = idle_timeout;
          timeout.tv_usec = 0;
 
          if (!max_fd) {
@@ -698,6 +702,10 @@ int main(int argc, char *argv[])
    int i;
    registerCrashHandlers();
    parseArgs(argc, argv);
+
+   char *timeout_s = getenv("SPINDLE_LOGD_TIMEOUT_SEC");
+   if (timeout_s && atoi(timeout_s) > 0)
+      idle_timeout = atoi(timeout_s);
 
    lockProcess = new UniqueProcess();
    if (!lockProcess->isUnique())
