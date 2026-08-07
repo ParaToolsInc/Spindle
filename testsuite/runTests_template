@@ -4,7 +4,20 @@ export SPINDLE_TEST_ARGS="$@"
 export SPINDLE_BLUEGENE="BLUEGENE_TEST"
 export TEST_RM="TEST_RESOURCE_MANAGER"
 export GLOBAL_RESULT=0
-CHECK_RETCODE() { if [[ $? != 0 ]]; then export GLOBAL_RESULT=-1; fi }
+FAILED_TESTS=""
+
+# Run a test command and record its exit status.  Failures are echoed
+# immediately (adjacent to the test's output in the log) and remembered so
+# the summary at the end can name each failed test.
+run_test() {
+    "$@"
+    local rc=$?
+    if [[ $rc != 0 ]]; then
+        echo "TEST FAILED (exit status $rc): $*"
+        FAILED_TESTS="${FAILED_TESTS}  $* (exit status ${rc})"$'\n'
+        export GLOBAL_RESULT=-1
+    fi
+}
 
 # For slurm-plugin, whether we use a session is determined by the allocation we run in.
 # Run only the non-session tests if this allocation doesn't use a session.
@@ -16,128 +29,72 @@ fi
 
 if test "x$SKIP_NONSESSION" != "xtrue"; then
 
-./run_driver --dependency --push
-CHECK_RETCODE
-./run_driver --dlopen --push
-CHECK_RETCODE
-./run_driver --dlreopen --push
-CHECK_RETCODE
-./run_driver --thrdopen --push
-CHECK_RETCODE
-./run_driver --reorder --push
-CHECK_RETCODE
-./run_driver --partial --push
-CHECK_RETCODE
-./run_driver --ldpreload --push
-CHECK_RETCODE
-./run_driver --spindleapi --push
-CHECK_RETCODE
+run_test ./run_driver --dependency --push
+run_test ./run_driver --dlopen --push
+run_test ./run_driver --dlreopen --push
+run_test ./run_driver --thrdopen --push
+run_test ./run_driver --reorder --push
+run_test ./run_driver --partial --push
+run_test ./run_driver --ldpreload --push
+run_test ./run_driver --spindleapi --push
 
-./run_driver --dependency --pull
-CHECK_RETCODE
-./run_driver --dlopen --pull
-CHECK_RETCODE
-./run_driver --dlreopen --pull
-CHECK_RETCODE
-./run_driver --thrdopen --pull
-CHECK_RETCODE
-./run_driver --reorder --pull
-CHECK_RETCODE
-./run_driver --partial --pull
-CHECK_RETCODE
-./run_driver --ldpreload --pull
-CHECK_RETCODE
-./run_driver --spindleapi --pull
-CHECK_RETCODE
+run_test ./run_driver --dependency --pull
+run_test ./run_driver --dlopen --pull
+run_test ./run_driver --dlreopen --pull
+run_test ./run_driver --thrdopen --pull
+run_test ./run_driver --reorder --pull
+run_test ./run_driver --partial --pull
+run_test ./run_driver --ldpreload --pull
+run_test ./run_driver --spindleapi --pull
 
-./run_driver --dependency --numa
-CHECK_RETCODE
-./run_driver --dlopen --numa
-CHECK_RETCODE
-./run_driver --dlreopen --numa
-CHECK_RETCODE
-./run_driver --thrdopen --numa
-CHECK_RETCODE
-./run_driver --reorder --numa
-CHECK_RETCODE
-./run_driver --partial --numa
-CHECK_RETCODE
-./run_driver --ldpreload --numa
-CHECK_RETCODE
-./run_driver --spindleapi --numa
-CHECK_RETCODE
+run_test ./run_driver --dependency --numa
+run_test ./run_driver --dlopen --numa
+run_test ./run_driver --dlreopen --numa
+run_test ./run_driver --thrdopen --numa
+run_test ./run_driver --reorder --numa
+run_test ./run_driver --partial --numa
+run_test ./run_driver --ldpreload --numa
+run_test ./run_driver --spindleapi --numa
 
 if test "x$SPINDLE_BLUEGENE" != "xtrue"; then
-./run_driver --dependency --fork
-CHECK_RETCODE
-./run_driver --dlopen --fork
-CHECK_RETCODE
-./run_driver --dlreopen --fork
-CHECK_RETCODE
-./run_driver --thrdopen --fork
-CHECK_RETCODE
-./run_driver --reorder --fork
-CHECK_RETCODE
-./run_driver --partial --fork
-CHECK_RETCODE
-./run_driver --ldpreload --fork
-CHECK_RETCODE
-./run_driver --spindleapi --fork
-CHECK_RETCODE
+run_test ./run_driver --dependency --fork
+run_test ./run_driver --dlopen --fork
+run_test ./run_driver --dlreopen --fork
+run_test ./run_driver --thrdopen --fork
+run_test ./run_driver --reorder --fork
+run_test ./run_driver --partial --fork
+run_test ./run_driver --ldpreload --fork
+run_test ./run_driver --spindleapi --fork
 fi
 
 if test "x$SPINDLE_BLUEGENE" != "xtrue"; then
-./run_driver --dependency --forkexec
-CHECK_RETCODE
-./run_driver --dlopen --forkexec
-CHECK_RETCODE
-./run_driver --dlreopen --forkexec
-CHECK_RETCODE
-./run_driver --thrdopen --forkexec
-CHECK_RETCODE
-./run_driver --reorder --forkexec
-CHECK_RETCODE
-./run_driver --partial --forkexec
-CHECK_RETCODE
-./run_driver --ldpreload --forkexec
-CHECK_RETCODE
-./run_driver --spindleapi --forkexec
-CHECK_RETCODE
+run_test ./run_driver --dependency --forkexec
+run_test ./run_driver --dlopen --forkexec
+run_test ./run_driver --dlreopen --forkexec
+run_test ./run_driver --thrdopen --forkexec
+run_test ./run_driver --reorder --forkexec
+run_test ./run_driver --partial --forkexec
+run_test ./run_driver --ldpreload --forkexec
+run_test ./run_driver --spindleapi --forkexec
 fi
 
-./run_driver --dependency --chdir
-CHECK_RETCODE
-./run_driver --dlopen --chdir
-CHECK_RETCODE
-./run_driver --dlreopen --chdir
-CHECK_RETCODE
-./run_driver --thrdopen --chdir
-CHECK_RETCODE
-./run_driver --reorder --chdir
-CHECK_RETCODE
-./run_driver --partial --chdir
-CHECK_RETCODE
-./run_driver --ldpreload --chdir
-CHECK_RETCODE
-./run_driver --spindleapi --chdir
-CHECK_RETCODE
+run_test ./run_driver --dependency --chdir
+run_test ./run_driver --dlopen --chdir
+run_test ./run_driver --dlreopen --chdir
+run_test ./run_driver --thrdopen --chdir
+run_test ./run_driver --reorder --chdir
+run_test ./run_driver --partial --chdir
+run_test ./run_driver --ldpreload --chdir
+run_test ./run_driver --spindleapi --chdir
 
-./run_driver --dependency --preload
-CHECK_RETCODE
-./run_driver --dlopen --preload
-CHECK_RETCODE
-./run_driver --dlreopen --preload
-CHECK_RETCODE
-./run_driver --thrdopen --preload
-CHECK_RETCODE
-./run_driver --reorder --preload
-CHECK_RETCODE
-./run_driver --partial --preload
-CHECK_RETCODE
-./run_driver --ldpreload --preload
-CHECK_RETCODE
-./run_driver --spindleapi --preload
-CHECK_RETCODE
+run_test ./run_driver --dependency --preload
+run_test ./run_driver --dlopen --preload
+run_test ./run_driver --dlreopen --preload
+run_test ./run_driver --thrdopen --preload
+run_test ./run_driver --reorder --preload
+run_test ./run_driver --partial --preload
+run_test ./run_driver --ldpreload --preload
+run_test ./run_driver --spindleapi --preload
 
 fi # SKIP_NONSESSION
 
@@ -151,24 +108,15 @@ fi
 
 if test "x$SKIP_SESSION" != "xtrue"; then
 export SESSION_ID=`./run_driver --start-session`
-./run_driver --dependency --session
-CHECK_RETCODE
-./run_driver --dlopen --session
-CHECK_RETCODE
-./run_driver --dlreopen --session
-CHECK_RETCODE
-./run_driver --thrdopen --session
-CHECK_RETCODE
-./run_driver --reorder --session
-CHECK_RETCODE
-./run_driver --partial --session
-CHECK_RETCODE
-./run_driver --ldpreload --session
-CHECK_RETCODE
-./run_driver --spindleapi --session
-CHECK_RETCODE
-./run_driver --end-session $SESSION_ID
-CHECK_RETCODE
+run_test ./run_driver --dependency --session
+run_test ./run_driver --dlopen --session
+run_test ./run_driver --dlreopen --session
+run_test ./run_driver --thrdopen --session
+run_test ./run_driver --reorder --session
+run_test ./run_driver --partial --session
+run_test ./run_driver --ldpreload --session
+run_test ./run_driver --spindleapi --session
+run_test ./run_driver --end-session $SESSION_ID
 unset SESSION_ID
 else
 echo Skipping: ./run_driver --dependency --session
@@ -181,20 +129,18 @@ echo Skipping: ./run_driver --ldpreload --session
 echo Skipping: ./run_driver --spindleapi --session
 fi
 
-./run_driver --serial ./spindle_exec_test
-CHECK_RETCODE
+run_test ./run_driver --serial ./spindle_exec_test
 
-./run_driver --serial ./symbind_test
-CHECK_RETCODE
+run_test ./run_driver --serial ./symbind_test
 
-./run_driver --serial ./interpreter_test
-CHECK_RETCODE
+run_test ./run_driver --serial ./interpreter_test
 
-./run_driver --serial ./exec_shell
-CHECK_RETCODE
+run_test ./run_driver --serial ./exec_shell
 
 if [[ $GLOBAL_RESULT != 0 ]]; then
     echo SOME TESTS FAILED
+    echo "Failed tests:"
+    printf '%s' "$FAILED_TESTS"
     exit -1
 fi
 echo ALL TESTS PASSED

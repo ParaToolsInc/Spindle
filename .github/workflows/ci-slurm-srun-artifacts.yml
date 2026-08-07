@@ -2,6 +2,12 @@ name: ci-slurm-srun-artifacts
 
 on:
   workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Testsuite runs to attempt (stops and collects logs at first failure)'
+        required: false
+        default: '10'
+        type: string
 
 permissions:
   contents: read
@@ -12,7 +18,7 @@ jobs:
     name: Testsuite (Slurm srun, Ubuntu)
     environment: Spindle CI
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 300
     steps:
       - name: Check out Spindle
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -53,17 +59,45 @@ jobs:
         run: |
           docker exec slurm-srun-head bash -c 'munge -n | unmunge'
 
-      - name: Run spindle-slurm-srun-ubuntu testsuite
+      - name: Run spindle-slurm-srun-ubuntu testsuite until failure
         id: slurm-ubuntu-testsuite
         run: |
-          docker exec slurm-srun-head bash -c 'cd Spindle-build/testsuite && SPINDLE_DEBUG=3 salloc -n${workers} -N${workers} ./runTests ${workers}'
+          set -o pipefail
+          iterations='${{ inputs.iterations }}'
+          iterations="${iterations:-1}"
+          nodes="slurm-srun-head slurm-srun-node-1 slurm-srun-node-2 slurm-srun-node-3 slurm-srun-node-4"
+          mkdir -p runlogs
 
-      - name: Collect Spindle logs from containers
-        if: ${{ always() }}
+          for i in $(seq 1 "$iterations"); do
+            echo "=== testsuite iteration $i of $iterations ==="
+
+            # Clear debug logs from previous iterations so a failure's logs are
+            # unambiguous.
+            for node in $nodes; do
+              docker exec "$node" bash -c 'rm -f Spindle-build/testsuite/spindle_output.*' || true
+            done
+
+            if docker exec slurm-srun-head bash -c 'cd Spindle-build/testsuite && SPINDLE_DEBUG=3 salloc -n${workers} -N${workers} ./runTests ${workers}' 2>&1 | tee "runlogs/runTests-iter$i.log"; then
+              echo "=== iteration $i passed ==="
+              rm -f "runlogs/runTests-iter$i.log"
+            else
+              rc=$?
+              echo "=== iteration $i FAILED with exit status $rc ==="
+              echo "failed_iteration=$i" >> "$GITHUB_OUTPUT"
+              exit "$rc"
+            fi
+          done
+          echo "All $iterations iterations passed without reproducing the failure."
+
+      - name: Collect Spindle and Slurm logs from containers
+        if: ${{ always() && steps.slurm-ubuntu-testsuite.outcome != 'success' }}
         continue-on-error: true
         run: |
           failed=0
-          for node in slurm-head slurm-srun-node-1 slurm-srun-node-1 slurm-srun-node-2 slurm-srun-node-3 slurm-srun-node-4; do
+          mkdir -p spindle-logs
+          cp -r runlogs spindle-logs/ 2>/dev/null || true
+
+          for node in slurm-srun-head slurm-srun-node-1 slurm-srun-node-2 slurm-srun-node-3 slurm-srun-node-4; do
             echo "::group::Collecting logs from $node"
 
             if ! workdir=$(docker inspect -f '{{.Config.WorkingDir}}' "$node" 2>/dev/null); then
@@ -81,17 +115,23 @@ jobs:
             fi
 
             src="$workdir/Spindle-build/testsuite"
-            mkdir -p "spindle-logs/$node"
+            mkdir -p "spindle-logs/$node/testsuite"
 
-            if docker cp "$node:$src/." "spindle-logs/$node/"; then
-              ls -la "spindle-logs/$node/"
+            if docker cp "$node:$src/." "spindle-logs/$node/testsuite/"; then
+              find "spindle-logs/$node/testsuite" -type f ! -name 'spindle_output.*' -delete
+              find "spindle-logs/$node/testsuite" -type d -empty -delete
+              ls -la "spindle-logs/$node/testsuite/" || true
             else
               echo "Copy failed for $node; listing container path:"
               docker exec "$node" ls -la "$src" || docker exec "$node" ls -la "$workdir" || true
               failed=1
-              continue
             fi
-            find "spindle-logs/$node/" -type f ! -name 'spindle_output.*' -delete
+
+            # Slurm daemon logs record per-task exit codes and signals
+            # (slurmd.log on compute nodes, slurmctld.log on the head node).
+            mkdir -p "spindle-logs/$node/slurm"
+            docker cp "$node:/var/log/slurm/." "spindle-logs/$node/slurm/" || \
+              echo "No Slurm logs copied from $node."
 
             echo "::endgroup::"
           done
@@ -100,16 +140,14 @@ jobs:
           ls -R spindle-logs/ || true
           exit "$failed"
 
-
       - name: Upload Spindle logs
-        if: ${{ always() }}
+        if: ${{ always() && steps.slurm-ubuntu-testsuite.outcome != 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: spindle-logs-slurm-srun
           path: spindle-logs/
           retention-days: 7
           if-no-files-found: warn
-
 
       - name: Bring spindle-slurm-ubuntu down
         id: slurm-ubuntu-down
