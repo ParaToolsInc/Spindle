@@ -22,7 +22,9 @@ run_test() {
 # The serial tests run first: they are the most sensitive reproducer of the
 # shutdown-time SIGPIPE failure under investigation (an FE death there is
 # reported directly as the test's exit status), so a failing iteration stops
-# within seconds instead of after the full suite.
+# within seconds instead of after the full suite.  Skipped in
+# session-then-serial mode, which goes straight to the dirty-tail scenario.
+if test "x$SPINDLE_SESSION_SERIAL_ONLY" == "x"; then
 run_test ./run_driver --serial ./spindle_exec_test
 
 run_test ./run_driver --serial ./symbind_test
@@ -30,6 +32,7 @@ run_test ./run_driver --serial ./symbind_test
 run_test ./run_driver --serial ./interpreter_test
 
 run_test ./run_driver --serial ./exec_shell
+fi
 
 # With SPINDLE_SERIAL_TESTS_ONLY set, stop after the serial tests.  They run in
 # seconds, so a stress loop gets far more iterations per run when hunting the
@@ -41,6 +44,13 @@ if test "x$SPINDLE_SERIAL_TESTS_ONLY" == "x"; then
 # Run only the session tests if this allocation uses a session.
 SKIP_NONSESSION=false
 if test "x$TEST_RM" == "xslurm-plugin" && test "x$SPANK_SPINDLE_USE_SESSION" != "x"; then
+    SKIP_NONSESSION=true
+fi
+# Session-then-serial mode: skip the non-session tests and go straight to the
+# session block followed by the tail serial pass — the fast reproduction of
+# the "serial tests fail during session teardown" scenario.
+if test "x$SPINDLE_SESSION_SERIAL_ONLY" != "x"; then
+    echo "SPINDLE_SESSION_SERIAL_ONLY set: skipping non-session tests"
     SKIP_NONSESSION=true
 fi
 
@@ -144,6 +154,26 @@ echo Skipping: ./run_driver --reorder --session
 echo Skipping: ./run_driver --partial --session
 echo Skipping: ./run_driver --ldpreload --session
 echo Skipping: ./run_driver --spindleapi --session
+fi
+
+# Second serial pass: the confirmed serial-test SIGPIPE failures occurred when
+# these ran at the END of the suite, right after --end-session — concurrent
+# with the session FE/daemon/log-daemon teardown.  Serial-only clean-state runs
+# (600 iterations) never failed, so the dirty tail environment appears to be
+# part of the trigger.  Keep this pass immediately after the session block.
+run_test ./run_driver --serial ./spindle_exec_test
+
+run_test ./run_driver --serial ./symbind_test
+
+run_test ./run_driver --serial ./interpreter_test
+
+run_test ./run_driver --serial ./exec_shell
+
+# Report job steps still alive at suite end (e.g. the session daemon step has
+# been observed outliving --end-session until allocation teardown).
+if test "x$SLURM_JOB_ID" != "x" && command -v squeue > /dev/null; then
+    echo "Job steps still running at end of suite (expect none):"
+    squeue -s -j $SLURM_JOB_ID 2>/dev/null || true
 fi
 
 else
