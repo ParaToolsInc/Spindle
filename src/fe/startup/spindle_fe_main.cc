@@ -26,6 +26,8 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <fcntl.h>
 #include <string>
 #include <errno.h>
+#include <signal.h>
+#include <execinfo.h>
 
 #include "ldcs_api.h"
 #include "config.h"
@@ -88,9 +90,21 @@ Launcher *newLauncher(spindle_args_t *params, ConfigMap &config)
    return NULL;
 }
 
+static void on_sigpipe(int sig)
+{
+   void *trace[64];
+   static const char msg[] = "SIGPIPE in Spindle FE:\n";
+   write(2, msg, sizeof(msg)-1);
+   int depth = backtrace(trace, 64);
+   backtrace_symbols_fd(trace, depth, 2);
+   signal(sig, SIG_DFL);
+   raise(sig);
+}
+
 int main(int argc, char *argv[])
 {
    bool result;
+   signal(SIGPIPE, on_sigpipe);
    setupLogging(argc, argv);
 
    ConfigMap config("[Spindle Config]");
