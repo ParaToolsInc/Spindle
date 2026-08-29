@@ -418,11 +418,13 @@ extern int dlopen_filter(const char *name);
 static char patch[4096];
 static char *last_patch_location = NULL;
 static int last_patch_len;
+static int last_hwcaps_offset;
 static const char *stat_not_found_prefix = NOT_FOUND_PREFIX "/";
 
 static void pathpatch_old_name(char *filename)
 {
    int len;
+   const char * hwcaps;
    if (have_stat_patches)
       return;
    
@@ -433,8 +435,13 @@ static void pathpatch_old_name(char *filename)
       return;
    }
 
+   hwcaps = strstr(filename, HWCAPS_DIRNAME);
+   last_hwcaps_offset = (hwcaps != NULL) ? hwcaps - filename : 0;
+
    memcpy(patch, filename, len);
+   debug_printf2("Patching nonexistent directory name %s\n", filename);
    memcpy(filename, stat_not_found_prefix, len);
+   debug_printf2("Patched directory name to %s\n", filename);
    last_patch_location = filename;
    last_patch_len = len;
 }
@@ -445,12 +452,16 @@ void restore_pathpatch()
       return;   
    if (!last_patch_location || !last_patch_len)
       return;
+   if (last_hwcaps_offset > 0 && last_hwcaps_offset < last_patch_len)
+     last_patch_len = last_hwcaps_offset;
    if (strncmp(last_patch_location, stat_not_found_prefix, last_patch_len) != 0) {
       last_patch_location = NULL;
       last_patch_len = 0;
       return;
    }      
+   debug_printf2("Restoring patched directory name %s\n", last_patch_location);
    memcpy(last_patch_location, patch, last_patch_len);
+   debug_printf2("Restored patched directory name to %s\n", last_patch_location);
    last_patch_location = NULL;
    last_patch_len = 0;
 }

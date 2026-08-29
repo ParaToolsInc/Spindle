@@ -28,6 +28,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "spindle_regex.h"
 
 #define NOT_FOUND_PREFIX "/__not_exists"
+#define HWCAPS_DIRNAME "glibc-hwcaps"
 
 extern int use_ldcs;
 extern int ldcsid;
