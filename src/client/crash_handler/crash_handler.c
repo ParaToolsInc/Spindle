@@ -47,11 +47,12 @@ Place, Suite 330, Boston, MA 02111-1307 USA
     (sizeof(ldcs_message_header_t) + 3 * sizeof(int32_t) + CRASH_SITE_BUF_SIZE)
 #define CRASH_ABORT_MSG_MAX  (64u * 1024u)
 
-static int  crash_global_rank  = -1;
-static int  crash_display_rank = -1;
-static int  crash_read_fd      = -1;
-static int  crash_write_fd     = -1;
-static int  crash_installed    = 0;
+static int   crash_global_rank  = -1;
+static int   crash_display_rank = -1;
+static int   crash_read_fd      = -1;
+static int   crash_write_fd     = -1;
+static int   crash_installed    = 0;
+static pid_t crash_pid         = -1;
 
 static char *crash_altstack_buf = NULL;
 static char crash_site_buf[CRASH_SITE_BUF_SIZE];
@@ -260,6 +261,13 @@ static void crash_handler_entry(int sig, siginfo_t *info, void *uctx)
       return;
    }
 
+   /* A fork() child that has not reconnected still holds its parent's
+      connection state. It's not safe to reconnect from inside the signal
+      handler, so if that happens, we give up on deduplicating and reraise
+      the signal.*/
+   if (getpid() != crash_pid)
+      goto reraise;
+
    /* If we reach this point, the application did NOT fix the issue, so we
       know this is a real crash. Now we set the handler_active flag.
       This ensures that only the first crash to make it here goes through the
@@ -352,6 +360,7 @@ int crash_handler_install(int global_rank, int ldcsid_in)
 
    crash_global_rank = global_rank;
    crash_display_rank = resolve_display_rank(global_rank);
+   crash_pid = getpid();
 
    if (client_get_raw_fds(ldcsid_in, &crash_read_fd, &crash_write_fd) != 0 ||
        crash_read_fd < 0 || crash_write_fd < 0) {
