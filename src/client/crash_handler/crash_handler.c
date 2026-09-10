@@ -441,3 +441,32 @@ int crash_handler_install(int global_rank, int ldcsid_in)
    crash_installed = 1;
    return 0;
 }
+
+/* Refresh the cached connection state after a follow-fork reconnect. */
+int crash_handler_reset(int global_rank, int ldcsid_in)
+{
+   int read_fd = -1, write_fd = -1;
+
+   if (!crash_installed)
+      return -1;
+   if (ldcsid_in < 0) {
+      debug_printf("crash handler not refreshed: no server connection\n");
+      return -1;
+   }
+   if (client_get_raw_fds(ldcsid_in, &read_fd, &write_fd) != 0 ||
+       read_fd < 0 || write_fd < 0) {
+      err_printf("failed to get raw FDs for crash handler after fork\n");
+      return -1;
+   }
+
+   crash_read_fd = read_fd;
+   crash_write_fd = write_fd;
+   crash_global_rank = global_rank;
+   handler_active = 0;
+   __sync_synchronize();
+   crash_pid = getpid();
+
+   debug_printf("crash handler refreshed for fork child %d: rank %d, fds %d/%d\n",
+                (int) crash_pid, crash_global_rank, crash_read_fd, crash_write_fd);
+   return 0;
+}
