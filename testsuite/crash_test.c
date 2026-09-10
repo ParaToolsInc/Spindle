@@ -89,14 +89,17 @@ Place, Suite 330, Boston, MA 02111-1307 USA
  *   fork-child-prereconnect
  *                  child sets core limit to zero and crashes at
  *                  crash_function_A before making any call Spindle intercepts; 
- *                  parent waits, then crashes at the same site.
+ *                  parent waits, then crashes at the same site
  *   fork-child-reconnect
  *                  child makes an intercepted call, which reconnects it
  *                  with OPT_FOLLOWFORK and crashes at crash_function_A;
- *                  parent exits cleanly. 
+ *                  parent exits cleanly 
+ *   fork-child-reconnect-then-parent
+ *                  as fork-child-reconnect, but the parent then crashes at
+ *                  the same site
  *   fork-child-nofollow
  *                  child makes an intercepted call but does not reconnect when
- *                  run with --follow-fork=false.
+ *                  run with --follow-fork=false
  *   fork-child-inherited-safepoint
  *                  parent installs safepoint handler before forking; parent 
  *                  and child recover from safepoint faults through the handler
@@ -124,7 +127,6 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <fcntl.h>
@@ -153,7 +155,8 @@ static void usage(const char *prog) {
             "mmap-sigbus-bad|mmap-sigbus-fixed|chained-kill-segv|"
             "ignored-kill-segv|ignored-siginfo-kill-segv|default-siginfo-kill-segv|"
             "safepoint-longjmp|safepoint-longjmp-mt|safepoint-concurrent-chain|"
-            "fork-child-prereconnect|fork-child-reconnect|fork-child-nofollow|"
+            "fork-child-prereconnect|fork-child-reconnect|"
+            "fork-child-reconnect-then-parent|fork-child-nofollow|"
             "fork-child-inherited-safepoint|fork-exec-child-crash|"
             "all-same-no-mpi|no-crash}"
             " [--sleep <seconds>] [--cycles <n>]\n",
@@ -832,14 +835,14 @@ static void child_banner(const char *mode, int rank, int size) {
     fflush(stderr);
 }
 
-/* An intercepted call to cause the child to reconnect */
+/* An intercepted call to cause the child to reconnect. */
 static void child_intercepted_call(const char *mode, int rank) {
     int fd = open("/dev/null", O_RDONLY);
     if (fd < 0) {
         fprintf(stderr, "%s rank=%d: child open(/dev/null) failed\n", mode, rank);
         _exit(SAFEPOINT_RC_SETUP_FAILED);
     }
-    syscall(SYS_close, fd);
+    close(fd);
 }
 
 static void child_disable_core(const char *mode, int rank) {
@@ -890,16 +893,11 @@ static void do_fork_child_prereconnect(int rank) {
     _exit(SAFEPOINT_RC_NOT_TERMINATED);
 }
 
-/* Child performs Spindle-intercepted call to allow reconnection,
-   then crashes while the parent exits cleanly */
-static int do_fork_child_reconnect(int rank, int size) {
-    const char *mode = "fork-child-reconnect";
+/* Fork a child that performs a Spindle-intercepted call to allow
+   reconnection, then crashes at crash_function_A. */
+static int fork_reconnecting_crasher(const char *mode, int rank, int size) {
     pid_t child = fork_or_die(mode, rank);
     if (child == 0) {
-        /* Free a low descriptor first.  Otherwise the reconnect reopens
-           the daemon FIFOs on exactly the numbers it just closed, and a
-           handler still holding the old numbers works by coincidence. */
-        syscall(SYS_close, STDIN_FILENO);
         child_intercepted_call(mode, rank);
         child_banner(mode, rank, size);
         crash_function_A(rank);
@@ -908,6 +906,20 @@ static int do_fork_child_reconnect(int rank, int size) {
     if (wait_for_segv(mode, rank, child) != 0)
         return SAFEPOINT_RC_INCOMPLETE;
     return 0;
+}
+
+/* Child reconnects, then crashes while the parent exits cleanly. */
+static int do_fork_child_reconnect(int rank, int size) {
+    return fork_reconnecting_crasher("fork-child-reconnect", rank, size);
+}
+
+/* Child reconnects and crashes, then the parent crashes at the same site. */
+static void do_fork_child_reconnect_then_parent(int rank, int size) {
+    const char *mode = "fork-child-reconnect-then-parent";
+    if (fork_reconnecting_crasher(mode, rank, size) != 0)
+        _exit(SAFEPOINT_RC_INCOMPLETE);
+    crash_function_A(rank);
+    _exit(SAFEPOINT_RC_NOT_TERMINATED);
 }
 
 /* Meant to run with --follow-fork=false */
@@ -1162,6 +1174,8 @@ int main(int argc, char **argv) {
         int rc = do_fork_child_reconnect(rank, size);
         MPI_Finalize();
         return rc;
+    } else if (strcmp(mode, "fork-child-reconnect-then-parent") == 0) {
+        do_fork_child_reconnect_then_parent(rank, size);
     } else if (strcmp(mode, "fork-child-nofollow") == 0) {
         do_fork_child_nofollow(rank);
     } else if (strcmp(mode, "fork-child-inherited-safepoint") == 0) {

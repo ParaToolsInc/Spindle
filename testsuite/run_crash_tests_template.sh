@@ -28,11 +28,13 @@ die() { echo "FAIL: $*" >&2; exit 1; }
 # Fields:
 #  mode: --mode to pass to crash test runner
 #  cores: expected number of cores produced; if N, then equal to total number of ranks
-#  crashers: expected number of crashing ranks
-#    N = all ranks, E = even ranks (ceil(N/2)), or a literal count
+#  crashers: expected number of crash log rows
+#    N = all ranks, 2N = two per rank, E = even ranks (ceil(N/2)), or a
+#    literal count
 #  flags (comma-separated): "multi-rank" skips the mode on a single rank;
 #    "clean" expects the test to NOT crash; "altstack" runs the mode with
-#    --crash-altstack; "nofollowfork" runs it with --follow-fork=false.
+#    --crash-altstack; "nofollowfork" runs it with --follow-fork=false;
+#    "forkchild" means rows may come from fork or exec children of a rank.
 #  top_frame_regex: regex that should match the top frame in produced coredumps.
 #    Note that all threads will be checked, so in multithreaded examples the regex should
 #    also match anything that could be on threads other than the one that faulted.
@@ -41,48 +43,49 @@ die() { echo "FAIL: $*" >&2; exit 1; }
 #  binary: optional alternate executable to run in place of the default crash_test.
 #  crash_mode: optional alternate crash mode argument to executable
 CRASH_TESTS=(
-# mode                           ; cores ; crashers ; flags             ; top_frame_regex                              ; site_regex                                   ; binary               ; crash_mode
- 'all-same                       ; 1     ; N        ;                   ; crash_function_A                             ; crash_test\+0x    '
- 'fixed-address-exe              ; 1     ; N        ;                   ; crash_function_A                             ; crash_test_fixedaddr\+0x                     ; crash_test_fixedaddr ; all-same'
- 'pie-exe                        ; 1     ; N        ;                   ; crash_function_A                             ; crash_test_pie\+0x                           ; crash_test_pie       ; all-same'
- 'all-different                  ; N     ; N        ;                   ; crash_function_[0-9]+'
- 'two-groups                     ; 2     ; N        ;                   ; crash_function_(A|B)'
- 'one-crashes                    ; 1     ; 1        ;                   ; crash_function_A'
- 'partial                        ; 1     ; E        ;                   ; crash_function_A'
- 'late-straggler                 ; 1     ; N        ;                   ; crash_function_A'
- 'in-library                     ; 1     ; N        ;                   ; crash_in_library                             ; libcrashfuncs\.so\+0x    '
- 'in-dlmopen-library             ; 1     ; N        ;                   ; crash_in_library                             ; libcrashfuncs\.so\+0x    '
- 'in-fixed-library               ; 1     ; N        ;                   ; crash_in_fixed_library                       ; libcrashfixed\.so\+0x    '
- 'in-fixed-dlmopen-library       ; 1     ; N        ;                   ; crash_in_fixed_library                       ; libcrashfixed\.so\+0x    '
- 'in-library-ctor                ; 1     ; 1        ;                   ; ctor_crash'
- 'sigabrt                        ; 1     ; N        ;                   ; (__GI_)?raise|abort|pthread_kill'
- 'assert                         ; 1     ; N        ;                   ; (__GI_)?raise|abort|pthread_kill             ; ^abort:.*Assertion    '
- 'mixed-abort-segv               ; 2     ; N        ; multi-rank        ; (__GI_)?raise|abort|pthread_kill|do_mixed_abort_segv'
- 'kill-segv                      ; 1     ; N        ;                   ; kill|do_kill_segv                            ; libc\.so.*\+0x    '
- 'span-read                      ; 1     ; N        ;                   ; do_span_read'
- 'safepoint                      ; 0     ; 0        ; clean             ; -'
- 'safepoint-then-crash           ; 1     ; N        ;                   ; crash_function_A'
- 'safepoint-bad                  ; 1     ; N        ;                   ; do_safepoint_bad'
- 'safepoint-bad-write            ; 1     ; N        ;                   ; do_safepoint_bad_write'
- 'safepoint-fix-write            ; 0     ; 0        ; clean             ; -'
- 'safepoint-fix-write-altstack   ; 0     ; 0        ; clean,altstack    ; -                                            ;                                              ;                      ; safepoint-fix-write'
- 'safepoint-longjmp              ; 0     ; 0        ; clean             ; -'
- 'safepoint-span-read            ; 0     ; 0        ; clean             ; -'
- 'safepoint-span-write           ; 0     ; 0        ; clean             ; -'
- 'safepoint-span-bad-read        ; 1     ; N        ;                   ; do_safepoint_span_bad_read'
- 'safepoint-span-bad-write       ; 1     ; N        ;                   ; do_safepoint_span_bad_write'
- 'mmap-sigbus-bad                ; 1     ; N        ;                   ; do_mmap_sigbus_bad'
- 'mmap-sigbus-fixed              ; 0     ; 0        ; clean             ; -'
- 'chained-kill-segv              ; 0     ; 0        ; clean             ; -'
- 'ignored-kill-segv              ; 0     ; 0        ; clean             ; -'
- 'ignored-siginfo-kill-segv      ; 0     ; 0        ; clean             ; -'
- 'default-siginfo-kill-segv      ; 1     ; N        ;                   ; kill|do_default_siginfo_kill_segv            ; libc\.so.*\+0x    '
- 'fork-child-prereconnect        ; 1     ; N        ;                   ; crash_function_A                             ; crash_test\+0x    '
- 'fork-child-reconnect           ; 1     ; N        ;                   ; crash_function_A                             ; crash_test\+0x    '
- 'fork-child-nofollow            ; 1     ; N        ; nofollowfork      ; crash_function_A                             ; crash_test\+0x    '
- 'fork-child-inherited-safepoint ; 0     ; 0        ; clean             ; -'
- 'fork-exec-child-crash          ; 1     ; N        ;                   ; crash_function_A                             ; crash_test\+0x    '
- 'no-crash                       ; 0     ; 0        ; clean             ; -'
+# mode                              ; cores ; crashers ; flags             ; top_frame_regex                              ; site_regex                                   ; binary               ; crash_mode
+ 'all-same                          ; 1     ; N        ;                   ; crash_function_A                             ; crash_test\+0x    '
+ 'fixed-address-exe                 ; 1     ; N        ;                   ; crash_function_A                             ; crash_test_fixedaddr\+0x                     ; crash_test_fixedaddr ; all-same'
+ 'pie-exe                           ; 1     ; N        ;                   ; crash_function_A                             ; crash_test_pie\+0x                           ; crash_test_pie       ; all-same'
+ 'all-different                     ; N     ; N        ;                   ; crash_function_[0-9]+'
+ 'two-groups                        ; 2     ; N        ;                   ; crash_function_(A|B)'
+ 'one-crashes                       ; 1     ; 1        ;                   ; crash_function_A'
+ 'partial                           ; 1     ; E        ;                   ; crash_function_A'
+ 'late-straggler                    ; 1     ; N        ;                   ; crash_function_A'
+ 'in-library                        ; 1     ; N        ;                   ; crash_in_library                             ; libcrashfuncs\.so\+0x    '
+ 'in-dlmopen-library                ; 1     ; N        ;                   ; crash_in_library                             ; libcrashfuncs\.so\+0x    '
+ 'in-fixed-library                  ; 1     ; N        ;                   ; crash_in_fixed_library                       ; libcrashfixed\.so\+0x    '
+ 'in-fixed-dlmopen-library          ; 1     ; N        ;                   ; crash_in_fixed_library                       ; libcrashfixed\.so\+0x    '
+ 'in-library-ctor                   ; 1     ; 1        ;                   ; ctor_crash'
+ 'sigabrt                           ; 1     ; N        ;                   ; (__GI_)?raise|abort|pthread_kill'
+ 'assert                            ; 1     ; N        ;                   ; (__GI_)?raise|abort|pthread_kill             ; ^abort:.*Assertion    '
+ 'mixed-abort-segv                  ; 2     ; N        ; multi-rank        ; (__GI_)?raise|abort|pthread_kill|do_mixed_abort_segv'
+ 'kill-segv                         ; 1     ; N        ;                   ; kill|do_kill_segv                            ; libc\.so.*\+0x    '
+ 'span-read                         ; 1     ; N        ;                   ; do_span_read'
+ 'safepoint                         ; 0     ; 0        ; clean             ; -'
+ 'safepoint-then-crash              ; 1     ; N        ;                   ; crash_function_A'
+ 'safepoint-bad                     ; 1     ; N        ;                   ; do_safepoint_bad'
+ 'safepoint-bad-write               ; 1     ; N        ;                   ; do_safepoint_bad_write'
+ 'safepoint-fix-write               ; 0     ; 0        ; clean             ; -'
+ 'safepoint-fix-write-altstack      ; 0     ; 0        ; clean,altstack    ; -                                            ;                                              ;                      ; safepoint-fix-write'
+ 'safepoint-longjmp                 ; 0     ; 0        ; clean             ; -'
+ 'safepoint-span-read               ; 0     ; 0        ; clean             ; -'
+ 'safepoint-span-write              ; 0     ; 0        ; clean             ; -'
+ 'safepoint-span-bad-read           ; 1     ; N        ;                   ; do_safepoint_span_bad_read'
+ 'safepoint-span-bad-write          ; 1     ; N        ;                   ; do_safepoint_span_bad_write'
+ 'mmap-sigbus-bad                   ; 1     ; N        ;                   ; do_mmap_sigbus_bad'
+ 'mmap-sigbus-fixed                 ; 0     ; 0        ; clean             ; -'
+ 'chained-kill-segv                 ; 0     ; 0        ; clean             ; -'
+ 'ignored-kill-segv                 ; 0     ; 0        ; clean             ; -'
+ 'ignored-siginfo-kill-segv         ; 0     ; 0        ; clean             ; -'
+ 'default-siginfo-kill-segv         ; 1     ; N        ;                   ; kill|do_default_siginfo_kill_segv            ; libc\.so.*\+0x    '
+ 'fork-child-prereconnect           ; 1     ; N        ;                   ; crash_function_A                             ; crash_test\+0x    '
+ 'fork-child-reconnect              ; 1     ; N        ;                   ; crash_function_A                             ; crash_test\+0x    '
+ 'fork-child-nofollow               ; 1     ; N        ; nofollowfork      ; crash_function_A                             ; crash_test\+0x    '
+ 'fork-child-inherited-safepoint    ; 0     ; 0        ; clean             ; -'
+ 'fork-exec-child-crash             ; 1     ; N        ; forkchild         ; crash_function_A                             ; crash_test\+0x    '
+ 'fork-child-reconnect-then-parent  ; 1     ; 2N       ; forkchild         ; crash_function_A                             ; crash_test\+0x    '
+ 'no-crash                          ; 0     ; 0        ; clean             ; -'
 )
 
 declare -A TEST_CORES TEST_CRASHERS TEST_FLAGS TEST_TOPFRAME TEST_SITE TEST_BINARY TEST_CRASHMODE
@@ -148,8 +151,9 @@ resolve_crashers() {
    local mode="$1" val
    val="${TEST_CRASHERS[$mode]}"
    case "$val" in
-      N) val="$NODES" ;;
-      E) val=$(( (NODES + 1) / 2 )) ;;
+      N)  val="$NODES" ;;
+      2N) val=$(( 2 * NODES )) ;;
+      E)  val=$(( (NODES + 1) / 2 )) ;;
    esac
    printf '%s' "$val"
 }
@@ -424,14 +428,21 @@ verify_crash_log() {
 
    log_check_header "$log" || return 1
 
+   # Fork-child modes log rows from children of a rank
+   local forkchild=0 rank_limit="$NODES" ident
+   if has_flag "$mode" forkchild; then
+      forkchild=1
+      rank_limit=$(( 2 * NODES ))
+   fi
+
    local rc=0 total=0 line key
    local -A seen=() site_exemplar=() exemplar_rows=()
    while IFS= read -r line; do
       parse_log_row "$line"
       key="$ROW_EXE|$ROW_SITE"
       total=$((total + 1))
-      if ! [[ "$ROW_RANK" =~ ^[0-9]+$ ]] || [ "$ROW_RANK" -ge "$NODES" ]; then
-         echo "   rank '$ROW_RANK' outside expected range [0,$NODES)" >&2
+      if ! [[ "$ROW_RANK" =~ ^[0-9]+$ ]] || [ "$ROW_RANK" -ge "$rank_limit" ]; then
+         echo "   rank '$ROW_RANK' outside expected range [0,$rank_limit)" >&2
          rc=1
          continue
       fi
@@ -439,11 +450,13 @@ verify_crash_log() {
          echo "   rank $ROW_RANK: pid '$ROW_PID' is not a positive integer" >&2
          rc=1
       fi
-      if [ -n "${seen[$ROW_RANK]:-}" ]; then
-         echo "   rank $ROW_RANK repeated" >&2
+      ident="$ROW_RANK"
+      [ "$forkchild" = "1" ] && ident="$ROW_RANK/$ROW_PID"
+      if [ -n "${seen[$ident]:-}" ]; then
+         echo "   rank/pid $ident repeated" >&2
          rc=1
       fi
-      seen[$ROW_RANK]=1
+      seen[$ident]=1
       if [ -z "${site_exemplar[$key]:-}" ]; then
          site_exemplar[$key]="$ROW_EXEMPLAR"
          if ! [[ "$ROW_EXE" =~ $expected_exe ]]; then
@@ -458,7 +471,11 @@ verify_crash_log() {
          echo "   site '$key' exemplar ${site_exemplar[$key]} does not match expected $ROW_EXEMPLAR" >&2
          rc=1
       fi
-      if [ "$ROW_RANK" = "$ROW_EXEMPLAR" ]; then
+      # The exemplar's row
+      # in forkchild mode, also consider pid
+      if [ "$ROW_RANK" = "$ROW_EXEMPLAR" ] &&
+         { [ "$forkchild" = "0" ] ||
+           [[ "${ROW_COREPATH##*/}" =~ (^|[^0-9])$ROW_PID([^0-9]|$) ]]; }; then
          exemplar_rows[$key]=$(( ${exemplar_rows[$key]:-0} + 1 ))
       fi
    done < <(log_rows "$log")
