@@ -25,6 +25,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <string.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 
 #include "config.h"
@@ -282,9 +283,12 @@ static void crash_handler_entry(int sig, siginfo_t *info, void *uctx)
       goto reraise;
 
    if ((int) winning_rank != crash_global_rank) {
-      /* If we are NOT the winner, we set our own core limit to zero,
-         preventing us from dumping. If we are the winner, do nothing,
-         preserving the existing core limit. */
+      /* If we are NOT the winner, we prevent ourselves from dumping
+         by clearing the dumpable flag and setting our own core limit to 0.
+         If we are the winner, do nothing.
+         (When core_pattern pipes to a process, the core limit is ignored;
+         We clear the DUMPABLE flag to block both) */
+      (void) prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
       struct rlimit no_core = { 0, 0 };
       (void) setrlimit(RLIMIT_CORE, &no_core);
    }
