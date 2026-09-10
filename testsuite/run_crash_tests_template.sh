@@ -32,7 +32,7 @@ die() { echo "FAIL: $*" >&2; exit 1; }
 #    N = all ranks, E = even ranks (ceil(N/2)), or a literal count
 #  flags (comma-separated): "multi-rank" skips the mode on a single rank;
 #    "clean" expects the test to NOT crash; "altstack" runs the mode with
-#    --crash-altstack.
+#    --crash-altstack; "nofollowfork" runs it with --follow-fork=false.
 #  top_frame_regex: regex that should match the top frame in produced coredumps.
 #    Note that all threads will be checked, so in multithreaded examples the regex should
 #    also match anything that could be on threads other than the one that faulted.
@@ -77,6 +77,11 @@ CRASH_TESTS=(
  'ignored-kill-segv              ; 0     ; 0        ; clean             ; -'
  'ignored-siginfo-kill-segv      ; 0     ; 0        ; clean             ; -'
  'default-siginfo-kill-segv      ; 1     ; N        ;                   ; kill|do_default_siginfo_kill_segv            ; libc\.so.*\+0x    '
+ 'fork-child-prereconnect        ; 1     ; N        ;                   ; crash_function_A                             ; crash_test\+0x    '
+ 'fork-child-reconnect           ; 1     ; N        ;                   ; crash_function_A                             ; crash_test\+0x    '
+ 'fork-child-nofollow            ; 1     ; N        ; nofollowfork      ; crash_function_A                             ; crash_test\+0x    '
+ 'fork-child-inherited-safepoint ; 0     ; 0        ; clean             ; -'
+ 'fork-exec-child-crash          ; 1     ; N        ;                   ; crash_function_A                             ; crash_test\+0x    '
  'no-crash                       ; 0     ; 0        ; clean             ; -'
 )
 
@@ -248,6 +253,10 @@ launch() {
       cmdline_opts="$cmdline_opts --crash-altstack"
       flux_opts+=(-o spindle.crash-altstack)
    fi
+   if has_flag "$mode" nofollowfork; then
+      cmdline_opts="$cmdline_opts --follow-fork=false"
+      flux_opts+=(-o spindle.follow-fork=no)
+   fi
    ulimit -c unlimited
    # Make libcrashfuncs.so visible to dlopen() from the mode's scratch dir.
    export LD_LIBRARY_PATH="$TESTDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -364,7 +373,7 @@ log_check_header() {
       return 1
    fi
    IFS= read -r header <"$log"
-   if [[ "$header" != rank,exemplar,exe,site,corepath* ]]; then
+   if [ "$header" != "pid,rank,exemplar,exe,site,corepath" ]; then
       echo "   incorrect crash log header '$header'" >&2
       return 1
    fi
@@ -373,10 +382,11 @@ log_check_header() {
 
 log_rows() { tail -n +2 "$1"; }
 
-# Split a log entry into ROW_RANK, ROW_EXEMPLAR, ROW_EXE, ROW_SITE, ROW_COREPATH.
+# Split a log entry into ROW_PID, ROW_RANK, ROW_EXEMPLAR, ROW_EXE, ROW_SITE,
+# ROW_COREPATH.  The site and corepath fields may be CSV-quoted.
 parse_log_row() {
    local rest
-   IFS=, read -r ROW_RANK ROW_EXEMPLAR rest <<<"$1"
+   IFS=, read -r ROW_PID ROW_RANK ROW_EXEMPLAR rest <<<"$1"
    ROW_EXE="${rest%%,*}"
    rest="${rest#*,}"
    # Remove quoting if present
@@ -388,7 +398,11 @@ parse_log_row() {
       rest="${rest#"$ROW_SITE"}"
       rest="${rest#,}"
    fi
-   ROW_COREPATH="${rest%%,*}"
+   if [[ "$rest" =~ ^\"(([^\"]|\"\")*)\"$ ]]; then
+      ROW_COREPATH="${BASH_REMATCH[1]//\"\"/\"}"
+   else
+      ROW_COREPATH="$rest"
+   fi
 }
 
 # ---------------- crash log verification ----------------
@@ -420,6 +434,10 @@ verify_crash_log() {
          echo "   rank '$ROW_RANK' outside expected range [0,$NODES)" >&2
          rc=1
          continue
+      fi
+      if ! [[ "$ROW_PID" =~ ^[1-9][0-9]*$ ]]; then
+         echo "   rank $ROW_RANK: pid '$ROW_PID' is not a positive integer" >&2
+         rc=1
       fi
       if [ -n "${seen[$ROW_RANK]:-}" ]; then
          echo "   rank $ROW_RANK repeated" >&2
@@ -464,62 +482,56 @@ verify_crash_log() {
 }
 
 # Verify that each coredump recorded in the log actually exists on disk.
+# corepath is the site exemplar's predicted core file.
 verify_exemplar_cores() {
    local mode="$1"
    local dir="$2"
    local log="$dir/crash.log"
 
-   local -A rank_pid
-   local line r p f
-   for f in "$dir/stdout.log" "$dir/stderr.log"; do
-      [ -f "$f" ] || continue
-      while IFS= read -r line; do
-         if [[ "$line" =~ rank=([0-9]+)\ .*pid=([0-9]+) ]]; then
-            r="${BASH_REMATCH[1]}"
-            p="${BASH_REMATCH[2]}"
-            rank_pid[$r]="$p"
-         fi
-      done <"$f"
-   done
-
    local core cores
    cores=$(core_files "$dir")
 
-   local ex found predicted
-   local -A checked=()
+   local line key predicted
+   local -A site_corepath=() site_exemplar_pid=()
    while IFS= read -r line; do
       parse_log_row "$line"
-      ex="$ROW_EXEMPLAR"
-      predicted="$ROW_COREPATH"
-      [ -z "${checked[$ex]:-}" ] || continue
-      checked[$ex]=1
-      p="${rank_pid[$ex]:-}"
-      if [ -z "$p" ]; then
-         echo "   no pid banner for exemplar rank $ex; skipping core check" >&2
-         continue
+      key="$ROW_EXE|$ROW_SITE"
+      if [ -z "$ROW_COREPATH" ]; then
+         echo "   rank $ROW_RANK pid $ROW_PID: empty corepath for site '$key'" >&2
+         return 1
       fi
-      found=0
+      if [ -n "${site_corepath[$key]:-}" ] && [ "${site_corepath[$key]}" != "$ROW_COREPATH" ]; then
+         echo "   site '$key' has differing corepaths '${site_corepath[$key]}' and '$ROW_COREPATH'" >&2
+         return 1
+      fi
+      site_corepath[$key]="$ROW_COREPATH"
+      if [[ "${ROW_COREPATH##*/}" =~ (^|[^0-9])$ROW_PID([^0-9]|$) ]]; then
+         if [ -n "${site_exemplar_pid[$key]:-}" ]; then
+            echo "   site '$key': pids ${site_exemplar_pid[$key]} and $ROW_PID both match corepath '$ROW_COREPATH'" >&2
+            return 1
+         fi
+         site_exemplar_pid[$key]="$ROW_PID"
+      fi
+   done < <(log_rows "$log")
+
+   for key in "${!site_corepath[@]}"; do
+      predicted="${site_corepath[$key]}"
+      if [ -z "${site_exemplar_pid[$key]:-}" ]; then
+         echo "   site '$key': no logged pid appears in corepath '$predicted'" >&2
+         return 1
+      fi
+      local found=0
       for core in $cores; do
-         case "$core" in
-            */rank_"$ex"/*) ;;
-            *) continue ;;
-         esac
-         if [[ "${core##*/}" =~ (^|[^0-9])$p([^0-9]|$) ]]; then
+         if [ "$core" = "$predicted" ]; then
             found=1
             break
          fi
       done
       if [ "$found" != "1" ]; then
-         echo "   no coredump found for exemplar rank $ex (pid $p)" >&2
+         echo "   site '$key': logged corepath '$predicted' (pid ${site_exemplar_pid[$key]}) was not written" >&2
          return 1
       fi
-      # The log's corepath is the exemplar's predicted core file; it must be
-      # the file that was actually written
-      if [ "$predicted" != "$core" ]; then
-         echo "   logged corepath '$predicted' != coredump '$core' for exemplar rank $ex" >&2
-         return 1
-      fi
-   done < <(log_rows "$log")
+   done
    return 0
 }
 

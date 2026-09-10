@@ -401,9 +401,9 @@ int handle_client_crash_report(ldcs_process_data_t *procdata,
                                     key, key_len, client->crash_corepath, &e);
 
    if ((procdata->opts & OPT_CRASH_LOG) && e) {
-      crash_log_append_rank(e, display_rank);
-      debug_printf2("crash log: recorded local display rank %d at site '%s' (%d ranks)\n",
-                    (int) display_rank, e->site, e->log_ranks_count);
+      crash_log_append_rank(e, display_rank, (int32_t) client->remote_pid);
+      debug_printf2("crash log: recorded local display rank %d pid %d at site '%s' (%d ranks)\n",
+                    (int) display_rank, client->remote_pid, e->site, e->log_ranks_count);
       crash_log_updated(procdata);
    }
    free(key);

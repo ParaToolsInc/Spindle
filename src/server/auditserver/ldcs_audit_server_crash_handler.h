@@ -51,7 +51,7 @@ crash_site_entry_t *crash_site_insert(ldcs_process_data_t *procdata,
                                       const char *site, size_t site_len);
 
 /* Add a display rank to a site's crash-log rank list */
-void crash_log_append_rank(crash_site_entry_t *e, int32_t rank);
+void crash_log_append_rank(crash_site_entry_t *e, int32_t rank, int32_t pid);
 
 /* Send accumulated crash-log ranks to the parent. */
 void crash_log_flush_to_parent(ldcs_process_data_t *procdata);

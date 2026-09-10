@@ -28,6 +28,8 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "spindle_launch.h"
 #include "msgbundle.h"
 
+#define CRASH_LOG_RANK_WIRE_SIZE (2 * sizeof(int32_t))
+
 typedef struct {
    const char *site;
    int32_t site_len;
@@ -36,20 +38,22 @@ typedef struct {
    const char *ranks;
 } crash_log_entry_t;
 
-/* Appends a display rank to a site's crash-log rank list. */
-void crash_log_append_rank(crash_site_entry_t *e, int32_t rank)
+/* Appends a (display rank, pid) row to a site's crash-log rank list. */
+void crash_log_append_rank(crash_site_entry_t *e, int32_t rank, int32_t pid)
 {
    if (e->log_ranks_count >= e->log_ranks_cap) {
       int new_cap = e->log_ranks_cap ? e->log_ranks_cap * 2 : 8;
       e->log_ranks = realloc(e->log_ranks, new_cap * sizeof(*e->log_ranks));
       e->log_ranks_cap = new_cap;
    }
-   e->log_ranks[e->log_ranks_count++] = rank;
+   e->log_ranks[e->log_ranks_count].rank = rank;
+   e->log_ranks[e->log_ranks_count].pid = pid;
+   e->log_ranks_count++;
 }
 
 static size_t crash_log_entry_size(crash_site_entry_t *e)
 {
-   return 3 * sizeof(int32_t) + e->site_len + e->log_ranks_count * sizeof(int32_t);
+   return 3 * sizeof(int32_t) + e->site_len + e->log_ranks_count * CRASH_LOG_RANK_WIRE_SIZE;
 }
 
 static size_t crash_log_entry_pack(char *buf, crash_site_entry_t *e)
@@ -66,8 +70,12 @@ static size_t crash_log_entry_pack(char *buf, crash_site_entry_t *e)
    pos += sizeof(int32_t);
    memcpy(buf + pos, &nranks32, sizeof(int32_t));
    pos += sizeof(int32_t);
-   memcpy(buf + pos, e->log_ranks, e->log_ranks_count * sizeof(int32_t));
-   pos += e->log_ranks_count * sizeof(int32_t);
+   for (int j = 0; j < e->log_ranks_count; ++j) {
+      memcpy(buf + pos, &e->log_ranks[j].rank, sizeof(int32_t));
+      pos += sizeof(int32_t);
+      memcpy(buf + pos, &e->log_ranks[j].pid, sizeof(int32_t));
+      pos += sizeof(int32_t);
+   }
    return pos;
 }
 
@@ -89,10 +97,10 @@ static int crash_log_parse_entry(char *data, size_t len, size_t *pos,
    p += sizeof(int32_t);
    memcpy(&out->nranks, data + p, sizeof(int32_t));
    p += sizeof(int32_t);
-   if (out->nranks < 0 || p + (size_t) out->nranks * sizeof(int32_t) > len)
+   if (out->nranks < 0 || p + (size_t) out->nranks * CRASH_LOG_RANK_WIRE_SIZE > len)
       return -1;
    out->ranks = data + p;
-   p += (size_t) out->nranks * sizeof(int32_t);
+   p += (size_t) out->nranks * CRASH_LOG_RANK_WIRE_SIZE;
    *pos = p;
    return 0;
 }
@@ -179,9 +187,11 @@ static void crash_log_merge_entry(ldcs_process_data_t *procdata,
    if (ent->exemplar != -1)
       e->exemplar_rank = (int) ent->exemplar;
    for (j = 0; j < (int) ent->nranks; ++j) {
-      int32_t r;
-      memcpy(&r, ent->ranks + j * sizeof(int32_t), sizeof(int32_t));
-      crash_log_append_rank(e, r);
+      int32_t r, pid;
+      const char *row = ent->ranks + j * CRASH_LOG_RANK_WIRE_SIZE;
+      memcpy(&r, row, sizeof(int32_t));
+      memcpy(&pid, row + sizeof(int32_t), sizeof(int32_t));
+      crash_log_append_rank(e, r, pid);
    }
    debug_printf2("crash log merged site '%s': now %d ranks, exemplar %d\n",
                  e->site, e->log_ranks_count, e->exemplar_rank);
@@ -226,14 +236,16 @@ malformed:
 
 static int rank_cmp(const void *a, const void *b)
 {
-   int32_t ra = *(const int32_t *) a;
-   int32_t rb = *(const int32_t *) b;
-   if (ra < rb) return -1;
-   if (ra > rb) return 1;
+   const crash_log_rank_t *ra = a;
+   const crash_log_rank_t *rb = b;
+   if (ra->rank < rb->rank) return -1;
+   if (ra->rank > rb->rank) return 1;
+   if (ra->pid < rb->pid) return -1;
+   if (ra->pid > rb->pid) return 1;
    return 0;
 }
 
-#define CRASH_LOG_HEADER "rank,exemplar,exe,site,corepath"
+#define CRASH_LOG_HEADER "pid,rank,exemplar,exe,site,corepath"
 
 static void write_csv_field(FILE *f, const char *s, size_t len)
 {
@@ -313,7 +325,8 @@ void crash_log_root_write(ldcs_process_data_t *procdata)
       const char *corepath = e->exemplar_corepath ? e->exemplar_corepath : "";
       size_t corepath_len = strlen(corepath);
       for (j = 0; j < e->log_ranks_count; ++j) {
-         fprintf(f, "%d,%d,", (int) e->log_ranks[j], e->exemplar_rank);
+         fprintf(f, "%d,%d,%d,", (int) e->log_ranks[j].pid,
+                 (int) e->log_ranks[j].rank, e->exemplar_rank);
          write_csv_field(f, exe, exe_len);
          fputc(',', f);
          write_csv_field(f, site, site_len);

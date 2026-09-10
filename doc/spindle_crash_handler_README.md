@@ -102,16 +102,17 @@ The log is a CSV file with a header line and one line per crashing
 rank:
 
 ```
-    rank,exemplar,exe,site,corepath
-    4,4,/home/me/my_app,libsolver.so.1+0x2f10,/p/lustre/me/run/core.my_app.19204
-    5,4,/home/me/my_app,libsolver.so.1+0x2f10,/p/lustre/me/run/core.my_app.19204
-    6,4,/home/me/my_app,libsolver.so.1+0x2f10,/p/lustre/me/run/core.my_app.19204
-    0,0,/home/me/my_app,abort:my_app: solver.c:88: solve: Assertion `n > 0' failed.\n,/p/lustre/me/run/core.my_app.19200
-    1,0,/home/me/my_app,abort:my_app: solver.c:88: solve: Assertion `n > 0' failed.\n,/p/lustre/me/run/core.my_app.19200
+    pid,rank,exemplar,exe,site,corepath
+    19204,4,4,/home/me/my_app,libsolver.so.1+0x2f10,/p/lustre/me/run/core.my_app.19204
+    19205,5,4,/home/me/my_app,libsolver.so.1+0x2f10,/p/lustre/me/run/core.my_app.19204
+    19206,6,4,/home/me/my_app,libsolver.so.1+0x2f10,/p/lustre/me/run/core.my_app.19204
+    19200,0,0,/home/me/my_app,abort:my_app: solver.c:88: solve: Assertion `n > 0' failed.\n,/p/lustre/me/run/core.my_app.19200
+    19201,1,0,/home/me/my_app,abort:my_app: solver.c:88: solve: Assertion `n > 0' failed.\n,/p/lustre/me/run/core.my_app.19200
 ```
 
 The columns are:
 
+- `pid`: the process id of the process that crashed.
 - `rank`: the rank that crashed, as numbered by the launcher (for
     example, `PMIX_RANK`, `SLURM_PROCID`, or `FLUX_TASK_RANK`).
 - `exemplar`: the rank selected to write the coredump for the
@@ -119,6 +120,8 @@ The columns are:
 - `exe`: the path to the executable that crashed.
 - `site`: the library+offset or abort message of the crash.
 - `corepath`: the path to the core file for the given crash site.
+    This is the exemplar's core file, repeated on every row of the
+    site.
 
 The log is written when the job exits, or at session end when running
 in session mode.  If no process crashed, no log file is created.

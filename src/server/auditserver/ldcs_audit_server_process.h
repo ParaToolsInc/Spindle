@@ -128,6 +128,12 @@ typedef struct crash_waiter_t {
    node_peer_t peer;
 } crash_waiter_t;
 
+
+typedef struct {
+   int32_t rank;
+   int32_t pid;
+} crash_log_rank_t;
+
 typedef struct crash_site_entry_t {
    char *site;
    size_t site_len;
@@ -135,7 +141,7 @@ typedef struct crash_site_entry_t {
    crash_waiter_t waiter;
    int exemplar_rank;
    char *exemplar_corepath;
-   int32_t *log_ranks;
+   crash_log_rank_t *log_ranks;
    int log_ranks_count;
    int log_ranks_cap;
 } crash_site_entry_t;
