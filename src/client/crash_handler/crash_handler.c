@@ -241,7 +241,20 @@ static void crash_handler_entry(int sig, siginfo_t *info, void *uctx)
 
    /* Check whether the application's signal handler resolved the fault.
       If it did, we return and let the instruction re-execute. */
-   if (chained && crash_sigchain_fault_resolved(sig, info, uctx, pc_before)) {
+   if (chained == CRASH_CHAIN_HANDLED &&
+       crash_sigchain_fault_resolved(sig, info, uctx, pc_before)) {
+      reentering = 0;
+      errno = saved_errno;
+      return;
+   }
+
+   /* If the application disposition was SIG_IGN and the signal was
+      user-sent, the kernel would have discarded it if Spindle's handler
+      hadn't been registered, so we return with no effect to mimic the
+      ignore. A kernel-sent fault still terminates with SIG_IGN
+      (forcing the disposition to be SIG_DFL), so we continue for
+      kernel-sent signals. */
+   if (chained == CRASH_CHAIN_IGNORED && info->si_code <= 0) {
       reentering = 0;
       errno = saved_errno;
       return;

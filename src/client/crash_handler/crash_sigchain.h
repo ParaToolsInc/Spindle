@@ -20,6 +20,11 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <signal.h>
 #include <stddef.h>
 
+/* Return values of crash_sigchain_chain_to_app */
+#define CRASH_CHAIN_NONE     0  /* no application handler */
+#define CRASH_CHAIN_HANDLED  1  /* application handler ran and returned */
+#define CRASH_CHAIN_IGNORED  2  /* application disposition is SIG_IGN */
+
 int crash_sigchain_is_owned(int sig);
 void crash_sigchain_register_existing_handler(int sig, const struct sigaction *handler_old);
 int crash_sigchain_chain_to_app(int sig, siginfo_t *info, void *ucontext);

@@ -67,6 +67,7 @@ struct app_disposition {
    int flags;
    int has_sigaction;
    int active;
+   int ignored;
 };
 
 static const int OWNED_SIGS[] = { SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT };
@@ -103,11 +104,12 @@ static void store_disposition(int sig, const struct sigaction *act)
 {
    if (act == NULL) return;
    struct app_disposition *d = &disp_store[sig];
-   if (!(act->sa_flags & SA_SIGINFO) &&
-       (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN)) {
+   if (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN) {
       d->active = 0;
+      d->ignored = (act->sa_handler == SIG_IGN);
       return;
    }
+   d->ignored = 0;
    d->has_sigaction = (act->sa_flags & SA_SIGINFO) ? 1 : 0;
    if (d->has_sigaction) {
       d->sigaction_fn = act->sa_sigaction;
@@ -127,7 +129,7 @@ static void get_disposition(int sig, struct sigaction *out)
    struct app_disposition *d = &disp_store[sig];
    memset(out, 0, sizeof *out);
    if (!d->active) {
-      out->sa_handler = SIG_DFL;
+      out->sa_handler = d->ignored ? SIG_IGN : SIG_DFL;
       return;
    }
    if (d->has_sigaction) {
@@ -152,9 +154,11 @@ void crash_sigchain_register_existing_handler(int sig, const struct sigaction *h
    debug_printf2("stored application signal handler for sig %d\n", sig);
 }
 
-/* Run the application signal handler, if present.
-   Returns 0 if there was no handler to run, 1 if there was an application
-   handler and we successfully ran it and returned from it. */
+/* Run the application signal handler, if present.  Returns 
+     - CRASH_CHAIN_NONE if the disposition is SIG_DFL
+     - CRASH_CHAIN_IGNORED if it is SIG_IGN
+     - CRASH_CHAIN_HANDLED if there was an application handler 
+       and we successfully ran it and returned from it. */
 int crash_sigchain_chain_to_app(int sig, siginfo_t *info, void *ucontext)
 {
    struct app_disposition local;
@@ -163,8 +167,9 @@ int crash_sigchain_chain_to_app(int sig, siginfo_t *info, void *ucontext)
 
    /* If there's no application handler, nothing more for us to do */
    if (!disp_store[sig].active) {
+      int ignored = disp_store[sig].ignored;
       crash_disp_unlock(sig);
-      return 0;
+      return ignored ? CRASH_CHAIN_IGNORED : CRASH_CHAIN_NONE;
    }
 
    /* Make a local copy of the signal disposition so we can release the lock
@@ -193,7 +198,7 @@ int crash_sigchain_chain_to_app(int sig, siginfo_t *info, void *ucontext)
    /* If we reach here, the application handler returned.
     Restore the mask to its previous value. */
    (void) sigprocmask(SIG_SETMASK, &saved, NULL);
-   return 1;
+   return CRASH_CHAIN_HANDLED;
 }
 
 /* Fault resolution detection

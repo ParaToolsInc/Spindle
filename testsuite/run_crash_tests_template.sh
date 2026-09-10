@@ -74,6 +74,9 @@ CRASH_TESTS=(
  'mmap-sigbus-bad                ; 1     ; N        ;                   ; do_mmap_sigbus_bad'
  'mmap-sigbus-fixed              ; 0     ; 0        ; clean             ; -'
  'chained-kill-segv              ; 0     ; 0        ; clean             ; -'
+ 'ignored-kill-segv              ; 0     ; 0        ; clean             ; -'
+ 'ignored-siginfo-kill-segv      ; 0     ; 0        ; clean             ; -'
+ 'default-siginfo-kill-segv      ; 1     ; N        ;                   ; kill|do_default_siginfo_kill_segv            ; libc\.so.*\+0x    '
  'no-crash                       ; 0     ; 0        ; clean             ; -'
 )
 

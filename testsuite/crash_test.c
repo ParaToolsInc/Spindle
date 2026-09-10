@@ -75,6 +75,15 @@ Place, Suite 330, Boston, MA 02111-1307 USA
  *                  app handler fixes access past the end of an mmap'ed file by extending it
  *   chained-kill-segv
  *                  app handler handles a kill()-sent SIGSEGV and returns
+ *   ignored-kill-segv
+ *                  app sets SIGSEGV disposition to SIG_IGN via signal()
+ *                  then kill()s itself with SIGSEGV
+ *   ignored-siginfo-kill-segv
+ *                  app sets SIGSEGV disposition to SIG_IGN via sigaction()
+ *                  then kill()s itself with SIGSEGV
+ *   default-siginfo-kill-segv
+ *                  app explicitly sets SIG_DFL via sigaction() with SA_SIGINFO
+ *                  then kill()s itself with SIGSEGV
  *
  *   no-crash       every rank exits cleanly
  */
@@ -115,6 +124,7 @@ static void usage(const char *prog) {
             "safepoint-span-read|safepoint-span-write|"
             "safepoint-span-bad-read|safepoint-span-bad-write|"
             "mmap-sigbus-bad|mmap-sigbus-fixed|chained-kill-segv|"
+            "ignored-kill-segv|ignored-siginfo-kill-segv|default-siginfo-kill-segv|"
             "safepoint-longjmp|safepoint-longjmp-mt|safepoint-concurrent-chain|no-crash}"
             " [--sleep <seconds>] [--cycles <n>]\n",
             prog);
@@ -701,9 +711,85 @@ static int do_chained_kill_segv(int rank) {
                 rank, safepoint_handler_invocations);
         return SAFEPOINT_RC_INCOMPLETE;
     }
-    fprintf(stderr, "chained-kill-segv rank=%d: survived handled kill(SIGSEGV)\n",
+    fprintf(stderr, "chained-kill-segv rank=%d: correctly survived handled kill(SIGSEGV)\n",
             rank);
     return 0;
+}
+
+/* Install a special disposition (SIG_IGN or SIG_DFL) for SIGSEGV through
+   sigaction() with the given flags, then read it back and check that the
+   same value is returned. This tests Spindle's sigaction wrapper. */
+static int install_special_sigsegv(void *disposition, int flags,
+                                   const char *mode, int rank) {
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = (void (*)(int)) disposition;
+    sa.sa_flags = flags;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGSEGV, &sa, NULL) != 0) {
+        fprintf(stderr, "%s rank=%d: sigaction failed\n", mode, rank);
+        return -1;
+    }
+    memset(&old, 0, sizeof old);
+    if (sigaction(SIGSEGV, NULL, &old) != 0) {
+        fprintf(stderr, "%s rank=%d: sigaction readback failed\n", mode, rank);
+        return -1;
+    }
+    if ((void *) old.sa_handler != disposition) {
+        fprintf(stderr, "%s rank=%d: disposition read back was different from expected: installed %p, read back %p\n",
+                mode, rank, disposition, (void *) old.sa_handler);
+        return -1;
+    }
+    return 0;
+}
+
+/* A SIGSEGV sent via kill() with SIG_IGN set should be discarded. */
+static int do_ignored_kill_segv_common(const char *mode, int rank, int use_siginfo) {
+    if (use_siginfo) {
+        if (install_special_sigsegv((void *) SIG_IGN, SA_SIGINFO, mode, rank) != 0)
+            return SAFEPOINT_RC_SETUP_FAILED;
+    } else {
+        if (signal(SIGSEGV, SIG_IGN) == SIG_ERR) {
+            fprintf(stderr, "%s rank=%d: signal(SIGSEGV, SIG_IGN) failed\n", mode, rank);
+            return SAFEPOINT_RC_SETUP_FAILED;
+        }
+    }
+
+    /* Send SIGSEGV to ourself; SIG_IGN is set, so this is expected to return. */
+    kill(getpid(), SIGSEGV);
+
+    struct sigaction old;
+    memset(&old, 0, sizeof old);
+    if (sigaction(SIGSEGV, NULL, &old) != 0) {
+        fprintf(stderr, "%s rank=%d: sigaction readback failed\n", mode, rank);
+        return SAFEPOINT_RC_INCOMPLETE;
+    }
+    if (old.sa_handler != SIG_IGN) {
+        fprintf(stderr, "%s rank=%d: unexpectedly got value other than SIG_IGN: got %p\n",
+                mode, rank, (void *) old.sa_handler);
+        return SAFEPOINT_RC_INCOMPLETE;
+    }
+    fprintf(stderr, "%s rank=%d: correctly survived ignored kill(SIGSEGV)\n", mode, rank);
+    return 0;
+}
+
+static int do_ignored_kill_segv(int rank) {
+    return do_ignored_kill_segv_common("ignored-kill-segv", rank, 0);
+}
+
+static int do_ignored_siginfo_kill_segv(int rank) {
+    return do_ignored_kill_segv_common("ignored-siginfo-kill-segv", rank, 1);
+}
+
+/* Verify that explicitly setting SIG_DFL with SA_SIGINFO still
+   produces the default disposition. */
+static void do_default_siginfo_kill_segv(int rank) {
+    if (install_special_sigsegv((void *) SIG_DFL, SA_SIGINFO,
+                                "default-siginfo-kill-segv", rank) != 0)
+        _exit(SAFEPOINT_RC_SETUP_FAILED);
+    kill(getpid(), SIGSEGV);
+    fprintf(stderr, "default-siginfo-kill-segv rank=%d: unexpectedly continued after kill(SIGSEGV)\n", rank);
+    _exit(SAFEPOINT_RC_NOT_TERMINATED);
 }
 
 static int sleep_seconds    = 10;
@@ -860,6 +946,16 @@ int main(int argc, char **argv) {
         int rc = do_chained_kill_segv(rank);
         MPI_Finalize();
         return rc;
+    } else if (strcmp(mode, "ignored-kill-segv") == 0) {
+        int rc = do_ignored_kill_segv(rank);
+        MPI_Finalize();
+        return rc;
+    } else if (strcmp(mode, "ignored-siginfo-kill-segv") == 0) {
+        int rc = do_ignored_siginfo_kill_segv(rank);
+        MPI_Finalize();
+        return rc;
+    } else if (strcmp(mode, "default-siginfo-kill-segv") == 0) {
+        do_default_siginfo_kill_segv(rank);
     } else if (strcmp(mode, "no-crash") == 0) {
         fprintf(stderr, "rank=%d no-crash, exiting cleanly\n", rank);
         fflush(stderr);
