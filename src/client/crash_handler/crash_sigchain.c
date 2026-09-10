@@ -427,7 +427,11 @@ int crash_sigchain_fault_resolved(int sig, siginfo_t *info, void *uctx,
       If we faulted on a read, retry the read and check if we refault. */
    int rc = pf_is_write(uctx) ? crash_maps_check_writable((uintptr_t) info->si_addr)
                               : crash_probe_byte_readable(info->si_addr);
-   return (rc == 1) ? 1 : 0;
+
+   /* Only a probe that positively saw the fault still present (0) means
+      unresolved.  If the probe itself could not run, treat as handled,
+      which preserves the behavior without Spindle. */
+   return rc != 0;
 }
 
 /* sigaction-family wrappers */
