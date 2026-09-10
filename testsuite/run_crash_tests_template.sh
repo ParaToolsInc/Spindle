@@ -482,7 +482,8 @@ verify_crash_log() {
 }
 
 # Verify that each coredump recorded in the log actually exists on disk.
-# corepath is the site exemplar's predicted core file.
+# corepath is the site exemplar's predicted core file, repeated on every
+# row of the site.
 verify_exemplar_cores() {
    local mode="$1"
    local dir="$2"
@@ -505,9 +506,10 @@ verify_exemplar_cores() {
          return 1
       fi
       site_corepath[$key]="$ROW_COREPATH"
+      [ "$ROW_RANK" = "$ROW_EXEMPLAR" ] || continue
       if [[ "${ROW_COREPATH##*/}" =~ (^|[^0-9])$ROW_PID([^0-9]|$) ]]; then
          if [ -n "${site_exemplar_pid[$key]:-}" ]; then
-            echo "   site '$key': pids ${site_exemplar_pid[$key]} and $ROW_PID both match corepath '$ROW_COREPATH'" >&2
+            echo "   site '$key': exemplar rank $ROW_EXEMPLAR pids ${site_exemplar_pid[$key]} and $ROW_PID both match corepath '$ROW_COREPATH'" >&2
             return 1
          fi
          site_exemplar_pid[$key]="$ROW_PID"
@@ -517,7 +519,7 @@ verify_exemplar_cores() {
    for key in "${!site_corepath[@]}"; do
       predicted="${site_corepath[$key]}"
       if [ -z "${site_exemplar_pid[$key]:-}" ]; then
-         echo "   site '$key': no logged pid appears in corepath '$predicted'" >&2
+         echo "   site '$key': no exemplar-rank row's pid appears in corepath '$predicted'" >&2
          return 1
       fi
       local found=0
