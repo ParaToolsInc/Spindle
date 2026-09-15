@@ -99,6 +99,13 @@ static void crash_disp_unlock(int sig)
    __sync_lock_release(&disp_lock[sig]);
 }
 
+void crash_sigchain_reset_locks(void)
+{
+   int sig;
+   for (sig = 0; sig < NSIG; sig++)
+      __sync_lock_release(&disp_lock[sig]);
+}
+
 /* Caller must hold disp lock for signal */
 static void store_disposition(int sig, const struct sigaction *act)
 {

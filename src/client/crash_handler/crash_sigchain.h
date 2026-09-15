@@ -29,6 +29,7 @@ int crash_sigchain_is_owned(int sig);
 void crash_sigchain_register_existing_handler(int sig, const struct sigaction *handler_old);
 int crash_sigchain_chain_to_app(int sig, siginfo_t *info, void *ucontext);
 void crash_sigchain_init(void);
+void crash_sigchain_reset_locks(void);
 int crash_sigchain_fault_resolved(int sig, siginfo_t *info, void *uctx,
                                   unsigned long pc_before);
 

@@ -36,6 +36,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "client_heap.h"
 #include "client_api.h"
 #include "crash_handler.h"
+#include "crash_sigchain.h"
 #include "spindle_launch.h"
 #include "shmcache.h"
 #include "ccwarns.h"
@@ -304,6 +305,16 @@ void check_for_fork()
       return;
    }
 
+   /* Reset Spindle's locks. Any threads other than the forking one disappear 
+    * at fork, and Spindle would deadlock if any disappeared thread holds
+    * a lock. */
+   reset_lock(&heap_lock);
+   reset_comm_lock();
+   crash_sigchain_reset_locks();
+   /* The debug log's FILE lock lives in this namespace's libc and is
+      inherited the same way, so reopen the log before printing anything. */
+   reset_spindle_debugging();
+
    if (!(opts & OPT_FOLLOWFORK)) {
       debug_printf("Client %d forked and is now process %d.  Not following fork.\n", cached_pid, current_pid);
       use_ldcs = 0;
@@ -312,7 +323,6 @@ void check_for_fork()
    }
    debug_printf("Client %d forked and is now process %d.  Following.\n", cached_pid, current_pid);
    cached_pid = current_pid;
-   reset_spindle_debugging();
    int result = reset_server_connection();
 
    /* The inherited crash handler still holds the parent's connection

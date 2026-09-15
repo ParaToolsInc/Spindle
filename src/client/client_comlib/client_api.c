@@ -38,6 +38,11 @@ static struct lock_t comm_lock;
 #define COMM_LOCK do { if (lock(&comm_lock) == -1) return -1; } while (0)
 #define COMM_UNLOCK unlock(&comm_lock)
 
+void reset_comm_lock(void)
+{
+   reset_lock(&comm_lock);
+}
+
 
 int send_cachepath_query( int fd, char **chosen_realized_cachepath, char **chosen_parsed_cachepath){
    int rc = 0;

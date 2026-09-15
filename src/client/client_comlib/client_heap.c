@@ -55,6 +55,12 @@ void unlock(struct lock_t *l)
    __sync_lock_release(&l->lock);
 }
 
+void reset_lock(struct lock_t *l)
+{
+   l->held_by = 0;
+   __sync_lock_release(&l->lock);
+}
+
 void *spindle_malloc(size_t size)
 {
    void *result;
