@@ -302,6 +302,15 @@ jobs:
         run: |
           docker exec slurm-srun-head bash -c 'cd Spindle-build/testsuite && salloc -n${workers} -N${workers} ./runTests ${workers}'
 
+      - name: Configure host core_pattern for coredumps
+        if: ${{ !env.ACT }}
+        run: |
+          sudo sysctl -w kernel.core_pattern='core.%p'
+
+      - name: Run spindle-slurm-srun-ubuntu crash tests
+        run: |
+          docker exec slurm-srun-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm --nodes=${workers} --scratch=/shared/spindle_crash_test'
+
       - name: Bring spindle-slurm-ubuntu down
         id: slurm-ubuntu-down
         if: ${{ always() }}
