@@ -607,8 +607,8 @@ verify_log_matches_core() {
 session_test_setup() {
    local name="$1"
    case "$LAUNCHER" in
-      slurm-plugin|flux) ;;
-      *) die "--$name requires --launcher=slurm-plugin or --launcher=flux" ;;
+      slurm-plugin|flux|slurm) ;;
+      *) die "--$name requires --launcher=slurm-plugin, --launcher=flux, or --launcher=slurm" ;;
    esac
 
    mkdir -p "$CRASH_TEST_SCRATCH" || die "can't create scratch dir '$CRASH_TEST_SCRATCH'"
@@ -621,6 +621,9 @@ session_test_setup() {
          ;;
       flux)
          SESSION_RUN="flux run -o userrc=$SPINDLE_RC -o spindle --env=LD_LIBRARY_PATH -N$NODES --tasks-per-node=$TASKS_PER_NODE --"
+         ;;
+      slurm)
+         SESSION_RUN="$SPINDLE --run-in-session \$SPINDLE_SESSION_ID -- srun -N$NODES --ntasks-per-node=$TASKS_PER_NODE"
          ;;
    esac
 }
@@ -647,6 +650,21 @@ session_test_launch() {
          else
             "$SPINDLE" --end-session >>"$SESSION_DIR/session.log" 2>&1
          fi
+         ;;
+      slurm)
+         cat >"$SESSION_DIR/session.sh" <<EOF
+#!/bin/bash
+sid=\$("$SPINDLE" --start-session $session_opts 2>>"$SESSION_DIR/session.log") || \
+   { echo "spindle --start-session failed" >&2; exit 1; }
+[ -n "\$sid" ] || { echo "spindle --start-session printed no session id" >&2; exit 1; }
+export SPINDLE_SESSION_ID="\$sid"
+"$SESSION_DIR/inner.sh"
+"$SPINDLE" --end-session="\$sid" >>"$SESSION_DIR/session.log" 2>&1
+EOF
+         chmod +x "$SESSION_DIR/session.sh"
+         ( cd "$SESSION_DIR" && salloc -N"$NODES" --ntasks-per-node="$TASKS_PER_NODE" \
+              "$SESSION_DIR/session.sh" ) \
+            >"$SESSION_DIR/stdout.log" 2>"$SESSION_DIR/stderr.log"
          ;;
    esac
    # Wait briefly for the server to shut down and write the log

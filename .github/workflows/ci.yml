@@ -244,6 +244,14 @@ jobs:
         run: |
           docker exec -e CRASH_TASKS_PER_NODE slurm-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test'
 
+      - name: Run spindle-slurm-ubuntu session crash test
+        run: |
+          docker exec -e CRASH_TASKS_PER_NODE slurm-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test --session'
+
+      - name: Run spindle-slurm-ubuntu cross-executable crash test
+        run: |
+          docker exec -e CRASH_TASKS_PER_NODE slurm-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test --cross-exe'
+
       - name: Bring spindle-slurm-ubuntu down
         id: slurm-ubuntu-down
         if: ${{ always() }}
@@ -310,6 +318,14 @@ jobs:
       - name: Run spindle-slurm-srun-ubuntu crash tests
         run: |
           docker exec -e CRASH_TASKS_PER_NODE slurm-srun-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test'
+
+      - name: Run spindle-slurm-srun-ubuntu session crash test
+        run: |
+          docker exec -e CRASH_TASKS_PER_NODE slurm-srun-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test --session'
+
+      - name: Run spindle-slurm-srun-ubuntu cross-executable crash test
+        run: |
+          docker exec -e CRASH_TASKS_PER_NODE slurm-srun-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test --cross-exe'
 
       - name: Bring spindle-slurm-ubuntu down
         id: slurm-ubuntu-down
