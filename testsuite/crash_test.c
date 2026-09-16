@@ -208,15 +208,13 @@ static void call_crash_in_library_common(int rank, int use_dlmopen) {
     if (!h) {
         fprintf(stderr, "rank=%d %s of libcrashfuncs.so failed: %s\n",
                 rank, dlopen_name, dlerror());
-        MPI_Abort(MPI_COMM_WORLD, 3);
-        return;
+        exit(3);
     }
     void (*fn)(int) = (void (*)(int)) dlsym(h, "crash_in_library");
     if (!fn) {
         fprintf(stderr, "rank=%d dlsym of crash_in_library failed: %s\n",
                 rank, dlerror());
-        MPI_Abort(MPI_COMM_WORLD, 3);
-        return;
+        exit(3);
     }
     fn(rank);
 }
@@ -231,15 +229,13 @@ static void call_crash_in_fixed_library_common(int rank, int use_dlmopen) {
     if (!h) {
         fprintf(stderr, "rank=%d %s of libcrashfixed.so failed: %s\n",
                 rank, dlopen_name, dlerror());
-        MPI_Abort(MPI_COMM_WORLD, 3);
-        return;
+        exit(3);
     }
     void (*fn)(int) = (void (*)(int)) dlsym(h, "crash_in_fixed_library");
     if (!fn) {
         fprintf(stderr, "rank=%d dlsym of crash_in_fixed_library failed: %s\n",
                 rank, dlerror());
-        MPI_Abort(MPI_COMM_WORLD, 3);
-        return;
+        exit(3);
     }
     fn(rank);
 }
@@ -248,7 +244,6 @@ static void crash_in_library_ctor(int rank) {
     if (rank != 0) {
         fprintf(stderr, "rank=%d exiting cleanly\n", rank);
         fflush(stderr);
-        MPI_Finalize();
         return;
     }
 
@@ -1059,6 +1054,10 @@ int main(int argc, char **argv) {
     }
 
     MPI_Barrier(MPI_COMM_WORLD);
+    /* Finalize MPI before crashing; otherwise, MPICH sometimes hangs
+     * waiting for an acknowledgement that never comes from a dead 
+     * process. */
+    MPI_Finalize();
 
     if (strcmp(mode, "all-same") == 0) {
         crash_function_A(rank);
@@ -1071,7 +1070,6 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr, "rank=%d exiting cleanly\n", rank);
             fflush(stderr);
-            MPI_Finalize();
             return 0;
         }
     } else if (strcmp(mode, "late-straggler") == 0) {
@@ -1095,7 +1093,6 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr, "rank=%d exiting cleanly\n", rank);
             fflush(stderr);
-            MPI_Finalize();
             return 0;
         }
     } else if (strcmp(mode, "in-library") == 0) {
@@ -1120,7 +1117,6 @@ int main(int argc, char **argv) {
         do_span_read(rank);
     } else if (strcmp(mode, "safepoint") == 0) {
         int rc = do_safepoint(rank, safepoint_cycles);
-        MPI_Finalize();
         return rc;
     } else if (strcmp(mode, "safepoint-then-crash") == 0) {
         return do_safepoint_then_crash(rank);
@@ -1130,19 +1126,15 @@ int main(int argc, char **argv) {
         return do_safepoint_bad_write(rank);
     } else if (strcmp(mode, "safepoint-fix-write") == 0) {
         int rc = do_safepoint_fix_write(rank, safepoint_cycles);
-        MPI_Finalize();
         return rc;
     } else if (strcmp(mode, "safepoint-longjmp") == 0) {
         int rc = do_safepoint_longjmp(rank, safepoint_cycles);
-        MPI_Finalize();
         return rc;
     } else if (strcmp(mode, "safepoint-span-read") == 0) {
         int rc = do_safepoint_span_read(rank, safepoint_cycles);
-        MPI_Finalize();
         return rc;
     } else if (strcmp(mode, "safepoint-span-write") == 0) {
         int rc = do_safepoint_span_write(rank, safepoint_cycles);
-        MPI_Finalize();
         return rc;
     } else if (strcmp(mode, "safepoint-span-bad-read") == 0) {
         return do_safepoint_span_bad_read(rank);
@@ -1152,19 +1144,15 @@ int main(int argc, char **argv) {
         return do_mmap_sigbus_bad(rank);
     } else if (strcmp(mode, "mmap-sigbus-fixed") == 0) {
         int rc = do_mmap_sigbus_fixed(rank);
-        MPI_Finalize();
         return rc;
     } else if (strcmp(mode, "chained-kill-segv") == 0) {
         int rc = do_chained_kill_segv(rank);
-        MPI_Finalize();
         return rc;
     } else if (strcmp(mode, "ignored-kill-segv") == 0) {
         int rc = do_ignored_kill_segv(rank);
-        MPI_Finalize();
         return rc;
     } else if (strcmp(mode, "ignored-siginfo-kill-segv") == 0) {
         int rc = do_ignored_siginfo_kill_segv(rank);
-        MPI_Finalize();
         return rc;
     } else if (strcmp(mode, "default-siginfo-kill-segv") == 0) {
         do_default_siginfo_kill_segv(rank);
@@ -1172,7 +1160,6 @@ int main(int argc, char **argv) {
         do_fork_child_prereconnect(rank);
     } else if (strcmp(mode, "fork-child-reconnect") == 0) {
         int rc = do_fork_child_reconnect(rank, size);
-        MPI_Finalize();
         return rc;
     } else if (strcmp(mode, "fork-child-reconnect-then-parent") == 0) {
         do_fork_child_reconnect_then_parent(rank, size);
@@ -1180,23 +1167,18 @@ int main(int argc, char **argv) {
         do_fork_child_nofollow(rank);
     } else if (strcmp(mode, "fork-child-inherited-safepoint") == 0) {
         int rc = do_fork_child_inherited_safepoint(rank, safepoint_cycles);
-        MPI_Finalize();
         return rc;
     } else if (strcmp(mode, "fork-exec-child-crash") == 0) {
         int rc = do_fork_exec_child_crash(rank, size);
-        MPI_Finalize();
         return rc;
     } else if (strcmp(mode, "no-crash") == 0) {
         fprintf(stderr, "rank=%d no-crash, exiting cleanly\n", rank);
         fflush(stderr);
-        MPI_Finalize();
         return 0;
     } else {
         if (rank == 0) usage(argv[0]);
-        MPI_Finalize();
         return 2;
     }
 
-    MPI_Finalize();
     return 0;
 }

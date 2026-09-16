@@ -2,7 +2,8 @@
 
 # Usage:
 #   ./run_crash_tests.sh [--launcher=serial|flux|slurm|slurm-plugin] --nodes=N
-#                        [--scratch=DIR] [--modes=LIST] [--session | --cross-exe]
+#                        [--tasks-per-node=T] [--scratch=DIR] [--modes=LIST]
+#                        [--session | --cross-exe]
 #
 # By default, runs all normal crash tests; use --modes to specify a subset to run.
 # --session and --cross-exe instead run the session-based tests;
@@ -17,6 +18,8 @@ set -u
 
 LAUNCHER="TEST_RESOURCE_MANAGER"
 NODES=""
+TASKS_PER_NODE=""
+RANKS=""
 CRASH_TEST_SCRATCH="${CRASH_TEST_SCRATCH:-}"
 SPINDLE="${SPINDLE:-SPINDLE_EXEC}"
 SPINDLE_RC="${SPINDLE_RC:-SPINDLE_RC_PATH}"
@@ -30,7 +33,7 @@ die() { echo "FAIL: $*" >&2; exit 1; }
 #  cores: expected number of cores produced; if N, then equal to total number of ranks
 #  crashers: expected number of crash log rows
 #    N = all ranks, 2N = two per rank, E = even ranks (ceil(N/2)), or a
-#    literal count
+#    literal count.
 #  flags (comma-separated): "multi-rank" skips the mode on a single rank;
 #    "clean" expects the test to NOT crash; "altstack" runs the mode with
 #    --crash-altstack; "nofollowfork" runs it with --follow-fork=false;
@@ -142,7 +145,7 @@ resolve_cores() {
       return
    fi
    val="${TEST_CORES[$mode]}"
-   [ "$val" = "N" ] && val="$NODES"
+   [ "$val" = "N" ] && val="$RANKS"
    printf '%s' "$val"
 }
 
@@ -151,9 +154,9 @@ resolve_crashers() {
    local mode="$1" val
    val="${TEST_CRASHERS[$mode]}"
    case "$val" in
-      N)  val="$NODES" ;;
-      2N) val=$(( 2 * NODES )) ;;
-      E)  val=$(( (NODES + 1) / 2 )) ;;
+      N)  val="$RANKS" ;;
+      2N) val=$(( 2 * RANKS )) ;;
+      E)  val=$(( (RANKS + 1) / 2 )) ;;
    esac
    printf '%s' "$val"
 }
@@ -166,14 +169,16 @@ usage() {
    cat <<EOF
 Usage:
   $prog [--launcher=serial|flux|slurm|slurm-plugin] [--nodes=N]
-        [--scratch=DIR] [--modes=mode1,mode2,...] [--session | --cross-exe]
+        [--tasks-per-node=T] [--scratch=DIR] [--modes=mode1,mode2,...]
+        [--session | --cross-exe]
 
 Runs tests of the crash handler.
 
 Options:
   --launcher=LAUNCHER  Resource manager to launch under: serial, flux, slurm, or
                        slurm-plugin.
-  --nodes=N            Number of nodes/ranks to run on.
+  --nodes=N            Number of nodes to run on.
+  --tasks-per-node=T   Ranks per node (default 1).
   --scratch=DIR        Directory where coredumps will be written.
                        When running on multiple nodes, this must be on a
                        shared filesystem.
@@ -198,6 +203,7 @@ parse_args() {
       case "$a" in
          --launcher=*) LAUNCHER="${a#*=}" ;;
          --nodes=*)    NODES="${a#*=}"    ;;
+         --tasks-per-node=*) TASKS_PER_NODE="${a#*=}" ;;
          --scratch=*)  CRASH_TEST_SCRATCH="${a#*=}"  ;;
          --modes=*)    MODES="${a#*=}"    ;;
          --session)    SESSION=1 ;;
@@ -231,10 +237,24 @@ check_prereqs() {
 
    if [ "$LAUNCHER" = "serial" ]; then
       NODES=1
+      # The serial launcher runs exactly one process
+      if [ -n "$TASKS_PER_NODE" ] && [ "$TASKS_PER_NODE" != "1" ]; then
+         die "--tasks-per-node is not supported with --launcher=serial"
+      fi
+      TASKS_PER_NODE=1
    elif [ -z "$NODES" ]; then
       die "--nodes required"
    elif ! [[ "$NODES" =~ ^[1-9][0-9]*$ ]]; then
       die "--nodes must be a positive integer (was '$NODES')"
+   fi
+   [ -n "$TASKS_PER_NODE" ] || TASKS_PER_NODE=1
+   if ! [[ "$TASKS_PER_NODE" =~ ^[1-9][0-9]*$ ]]; then
+      die "--tasks-per-node must be a positive integer (was '$TASKS_PER_NODE')"
+   fi
+   RANKS=$(( NODES * TASKS_PER_NODE ))
+   # all-different indexes crash_table by rank, and the table has 64 entries
+   if [ "$RANKS" -gt 64 ]; then
+      die "at most 64 ranks are supported (was $RANKS = $NODES nodes x $TASKS_PER_NODE tasks)"
    fi
 
    test -x "$TESTDIR/crash_test"            || die "can't find crash test executable"
@@ -274,17 +294,17 @@ launch() {
          flux run \
             -o userrc="$SPINDLE_RC" \
             "${flux_opts[@]}" \
-            -N"$NODES" -n"$NODES" \
+            -N"$NODES" --tasks-per-node="$TASKS_PER_NODE" \
             --env=LD_LIBRARY_PATH \
             -- "$binary" --crash-mode "$crash_mode"
          ;;
       slurm)
-         salloc -N"$NODES" -n"$NODES" \
+         salloc -N"$NODES" --ntasks-per-node="$TASKS_PER_NODE" \
             "$SPINDLE" $cmdline_opts -- \
                srun "$binary" --crash-mode "$crash_mode"
          ;;
       slurm-plugin)
-         salloc -N"$NODES" -n"$NODES" \
+         salloc -N"$NODES" --ntasks-per-node="$TASKS_PER_NODE" \
             srun --spindle="$cmdline_opts" \
                "$binary" --crash-mode "$crash_mode"
          ;;
@@ -428,11 +448,11 @@ verify_crash_log() {
 
    log_check_header "$log" || return 1
 
-   # Fork-child modes log rows from children of a rank
-   local forkchild=0 rank_limit="$NODES" ident
+   # forkchild modes log rows from children of a rank
+   local forkchild=0 rank_limit="$RANKS" ident
    if has_flag "$mode" forkchild; then
       forkchild=1
-      rank_limit=$(( 2 * NODES ))
+      rank_limit=$(( 2 * RANKS ))
    fi
 
    local rc=0 total=0 line key
@@ -600,7 +620,7 @@ session_test_setup() {
          SESSION_RUN="srun --spindle"
          ;;
       flux)
-         SESSION_RUN="flux run -o userrc=$SPINDLE_RC -o spindle --env=LD_LIBRARY_PATH -N$NODES -n$NODES --"
+         SESSION_RUN="flux run -o userrc=$SPINDLE_RC -o spindle --env=LD_LIBRARY_PATH -N$NODES --tasks-per-node=$TASKS_PER_NODE --"
          ;;
    esac
 }
@@ -611,7 +631,7 @@ session_test_launch() {
    ulimit -c unlimited
    case "$LAUNCHER" in
       slurm-plugin)
-         ( cd "$SESSION_DIR" && salloc -N"$NODES" -n"$NODES" \
+         ( cd "$SESSION_DIR" && salloc -N"$NODES" --ntasks-per-node="$TASKS_PER_NODE" \
               --spindle-session="$session_opts" "$SESSION_DIR/inner.sh" ) \
             >"$SESSION_DIR/stdout.log" 2>"$SESSION_DIR/stderr.log"
          ;;
@@ -669,8 +689,8 @@ EOF
    [ "$after1" = "absent" ] || { echo "FAIL session: log $after1 after run 1"; ok=0; }
    [ "$after2" = "absent" ] || { echo "FAIL session: log $after2 after run 2"; ok=0; }
    [ "$sites" = "2" ] || { echo "FAIL session: $sites sites after session end"; ok=0; }
-   [ "$total" = "$((2 * NODES))" ] || \
-      { echo "FAIL session: $total total ranks in final log (expected $((2 * NODES)))"; ok=0; }
+   [ "$total" = "$((2 * RANKS))" ] || \
+      { echo "FAIL session: $total total ranks in final log (expected $((2 * RANKS)))"; ok=0; }
 
    [ "$ok" = "1" ] || exit 1
    echo "PASS session"
@@ -748,10 +768,10 @@ verify_cross_exe() {
          echo "FAIL cross-exe: wrong crash sites found ('${exes[0]}', '${exes[1]}')"
          ok=0
       fi
-      # Verify each program crashed on every node, and the two runs did not merge.
+      # Verify every rank of each program crashed, and the two runs did not merge.
       local c
       for c in "${counts[@]}"; do
-         [ "$c" = "$NODES" ] || { echo "FAIL cross-exe: crashsite has $c rows (expected $NODES)"; ok=0; }
+         [ "$c" = "$RANKS" ] || { echo "FAIL cross-exe: crashsite has $c rows (expected $RANKS)"; ok=0; }
       done
    fi
 
@@ -885,7 +905,7 @@ main() {
       fi
 
       if has_flag "$mode" multi-rank && \
-         { [ "$LAUNCHER" = "serial" ] || [ "$NODES" -lt 2 ]; }; then
+         { [ "$LAUNCHER" = "serial" ] || [ "$RANKS" -lt 2 ]; }; then
          echo "SKIP $mode (needs multiple ranks)"
          continue
       fi
