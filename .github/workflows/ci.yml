@@ -167,15 +167,15 @@ jobs:
 
       - name: Run spindle-flux-ubuntu crash tests
         run: |
-          docker exec node-1 bash -c 'cd Spindle-build/testsuite && flux alloc --nodes=${workers} ./run_crash_tests.sh --launcher=flux --nodes=${workers} --scratch=/shared/spindle_crash_test'
+          docker exec -e CRASH_TASKS_PER_NODE node-1 bash -c 'cd Spindle-build/testsuite && flux alloc --nodes=${workers} ./run_crash_tests.sh --launcher=flux --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test'
 
       - name: Run spindle-flux-ubuntu session crash test
         run: |
-          docker exec node-1 bash -c 'cd Spindle-build/testsuite && flux alloc --nodes=${workers} ./run_crash_tests.sh --launcher=flux --nodes=${workers} --scratch=/shared/spindle_crash_test --session'
+          docker exec -e CRASH_TASKS_PER_NODE node-1 bash -c 'cd Spindle-build/testsuite && flux alloc --nodes=${workers} ./run_crash_tests.sh --launcher=flux --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test --session'
 
       - name: Run spindle-flux-ubuntu cross-executable crash test
         run: |
-          docker exec node-1 bash -c 'cd Spindle-build/testsuite && flux alloc --nodes=${workers} ./run_crash_tests.sh --launcher=flux --nodes=${workers} --scratch=/shared/spindle_crash_test --cross-exe'
+          docker exec -e CRASH_TASKS_PER_NODE node-1 bash -c 'cd Spindle-build/testsuite && flux alloc --nodes=${workers} ./run_crash_tests.sh --launcher=flux --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test --cross-exe'
 
       - name: Bring spindle-flux-ubuntu down
         id: flux-ubuntu-down
@@ -242,7 +242,7 @@ jobs:
 
       - name: Run spindle-slurm-ubuntu crash tests
         run: |
-          docker exec slurm-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm --nodes=${workers} --scratch=/shared/spindle_crash_test'
+          docker exec -e CRASH_TASKS_PER_NODE slurm-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test'
 
       - name: Bring spindle-slurm-ubuntu down
         id: slurm-ubuntu-down
@@ -309,7 +309,7 @@ jobs:
 
       - name: Run spindle-slurm-srun-ubuntu crash tests
         run: |
-          docker exec slurm-srun-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm --nodes=${workers} --scratch=/shared/spindle_crash_test'
+          docker exec -e CRASH_TASKS_PER_NODE slurm-srun-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test'
 
       - name: Bring spindle-slurm-ubuntu down
         id: slurm-ubuntu-down
@@ -381,15 +381,15 @@ jobs:
 
       - name: Run spindle-slurm-plugin-ubuntu crash tests
         run: |
-          docker exec slurm-plugin-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm-plugin --nodes=${workers} --scratch=/shared/spindle_crash_test'
+          docker exec -e CRASH_TASKS_PER_NODE slurm-plugin-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm-plugin --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test'
 
       - name: Run spindle-slurm-plugin-ubuntu session crash test
         run: |
-          docker exec slurm-plugin-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm-plugin --nodes=${workers} --scratch=/shared/spindle_crash_test --session'
+          docker exec -e CRASH_TASKS_PER_NODE slurm-plugin-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm-plugin --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test --session'
 
       - name: Run spindle-slurm-plugin-ubuntu cross-executable crash test
         run: |
-          docker exec slurm-plugin-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm-plugin --nodes=${workers} --scratch=/shared/spindle_crash_test --cross-exe'
+          docker exec -e CRASH_TASKS_PER_NODE slurm-plugin-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm-plugin --nodes=${workers} --tasks-per-node=${CRASH_TASKS_PER_NODE:-1} --scratch=/shared/spindle_crash_test --cross-exe'
 
       - name: Bring spindle-slurm-plugin-ubuntu down
         id: slurm-ubuntu-down
