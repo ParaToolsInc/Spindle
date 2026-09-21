@@ -49,6 +49,25 @@ int lock(struct lock_t *l)
    }
 }
 
+/* Version of lock that doesn't do an err_printf, as that
+ * would be unsafe from a signal handler. Used by crash handler */
+int lock_signal_safe(struct lock_t *l)
+{
+   pid_t me = gettid();
+   if (l->held_by == me)
+      return -1;
+   for (;;) {
+      long result = __sync_lock_test_and_set(&l->lock, 1);
+      if (result == 0) {
+         l->held_by = me;
+         return 0;
+      }
+      if (l->held_by == me)
+         return -1;
+      sched_yield();
+   }
+}
+
 void unlock(struct lock_t *l)
 {
    l->held_by = 0;

@@ -35,6 +35,7 @@ int send_location(int fd, char *location);
 int send_rankinfo_query(int fd, int *mylrank, int *mylsize, int *mymdrank, int *mymdsize);
 int send_end(int fd);
 void reset_comm_lock(void);
+extern struct lock_t comm_lock;
 int send_existance_test(int fd, char *path, int *exists);
 #define STAT_SELF 1
 int send_stat_request(int fd, char *path, int islstat, char *result);
