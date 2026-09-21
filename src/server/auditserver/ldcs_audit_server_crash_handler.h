@@ -60,10 +60,7 @@ void crash_log_free_ranks(crash_site_entry_t *e);
 /* Send accumulated crash-log ranks to the parent. */
 void crash_log_flush_to_parent(ldcs_process_data_t *procdata);
 
-/* Forward or write pending crash-log data */
-void crash_log_updated(ldcs_process_data_t *procdata);
-
-/* Write crash log file */
+/* Append the accumulated crash log to the log file. */
 void crash_log_root_write(ldcs_process_data_t *procdata);
 
 /* Free the crash-site table at shutdown */

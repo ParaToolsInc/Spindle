@@ -177,7 +177,6 @@ int ldcs_audit_server_process(spindle_args_t *args)
    ldcs_process_data.crash_sites = NULL;
    ldcs_process_data.crash_sites_count = 0;
    ldcs_process_data.crash_sites_cap = 0;
-   ldcs_process_data.crash_log_teardown = 0;
 
    if (ldcs_process_data.opts & OPT_PULL) {
       debug_printf("Using PULL model\n");
@@ -259,6 +258,8 @@ int ldcs_audit_server_run()
    /* start loop */
    debug_printf2("Entering server loop\n");
    ldcs_listen();
+
+   crash_log_root_write(&ldcs_process_data);
   
    ldcs_process_data.server_stat.listen_time= ldcs_get_time() - ldcs_process_data.server_stat.starttime;
    ldcs_process_data.server_stat.select_time=

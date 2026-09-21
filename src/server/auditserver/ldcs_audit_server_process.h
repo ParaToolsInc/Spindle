@@ -203,7 +203,6 @@ struct ldcs_process_data_struct
   crash_site_entry_t *crash_sites;
   int crash_sites_count;
   int crash_sites_cap;
-  int crash_log_teardown;
 
   /* multi daemon support */
   int md_rank;
