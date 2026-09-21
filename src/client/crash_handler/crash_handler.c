@@ -32,6 +32,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "ldcs_api.h"
 #include "client.h"
 #include "client_api.h"
+#include "client_heap.h"
 #include "crash_handler.h"
 #include "crash_arch.h"
 #include "crash_corename.h"
@@ -282,6 +283,14 @@ static void crash_handler_entry(int sig, siginfo_t *info, void *uctx)
    if (!crash_installed || crash_write_fd < 0 || crash_read_fd < 0) {
       goto reraise;
    }
+
+   /* Try to acquire the comm_lock before we send our crash report
+    * to the server. If this thread already held the lock, then we
+    * crashed inside of a Spindle communication; in that case, we give
+    * up and reraise the signal, as we can't be assured that it's safe
+    * to send a message. */
+   if (lock_signal_safe(&comm_lock) == -1)
+      goto reraise;
 
    /* Now we do the actual deduplication part. We get the program counter,
       resolve it to <library>+<offset> or abort_msg, and pass that crashsite

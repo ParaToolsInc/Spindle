@@ -31,6 +31,7 @@ struct lock_t {
 };
 
 int lock(struct lock_t *l);
+int lock_signal_safe(struct lock_t *l);
 void unlock(struct lock_t *l);
 void reset_lock(struct lock_t *l);
 

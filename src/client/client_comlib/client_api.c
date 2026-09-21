@@ -33,7 +33,7 @@
 #include "client_api.h"
 #include "client_heap.h"
 
-static struct lock_t comm_lock;
+struct lock_t comm_lock;
 
 #define COMM_LOCK do { if (lock(&comm_lock) == -1) return -1; } while (0)
 #define COMM_UNLOCK unlock(&comm_lock)
