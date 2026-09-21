@@ -643,8 +643,32 @@ session_test_launch() {
          fi
          ;;
    esac
-   # Wait briefly for the server to shut down and write the log
-   sleep 2
+
+   # Wait for session log to be writen at session end
+   local waited=0
+   while [ ! -s "$SESSION_LOG" ] && [ "$waited" -lt 300 ]; do
+      sleep 0.1
+      waited=$((waited + 1))
+   done
+}
+
+session_dump_diagnostics() {
+   local dir="$1" log="$2"
+   echo "--- session diagnostics: $dir"
+   echo "--- launcher stdout"
+   cat "$dir/stdout.log" 2>/dev/null
+   echo "--- launcher stderr"
+   cat "$dir/stderr.log" 2>/dev/null
+   echo "--- '(core dumped)' lines in launcher stderr: $(grep -c '(core dumped)' "$dir/stderr.log" 2>/dev/null)"
+   echo "--- core files found: $(count_cores "$dir")"
+   echo "--- directory listing"
+   ls -lR "$dir" 2>/dev/null
+   if [ -f "$log" ]; then
+      echo "--- crash log $log"
+      cat "$log"
+   else
+      echo "--- crash log $log: missing"
+   fi
 }
 
 # Session-mode crash-log test
@@ -666,10 +690,11 @@ if [ -e "$log" ]; then echo present; else echo absent; fi > "$dir/log_after_run2
 EOF
    session_test_launch
 
-   local after1 after2 sites=0 total=0 line
+   local after1 after2 sites=0 total=0 ncores line
    local -A keys=()
    after1=$(cat "$dir/log_after_run1" 2>/dev/null || echo missing)
    after2=$(cat "$dir/log_after_run2" 2>/dev/null || echo missing)
+   ncores=$(count_cores "$dir")
    if log_check_header "$log" 2>/dev/null; then
       while IFS= read -r line; do
          parse_log_row "$line"
@@ -682,11 +707,12 @@ EOF
    local ok=1
    [ "$after1" = "absent" ] || { echo "FAIL session: log $after1 after run 1"; ok=0; }
    [ "$after2" = "absent" ] || { echo "FAIL session: log $after2 after run 2"; ok=0; }
+   [ "$ncores" = "2" ] || { echo "FAIL session: $ncores coredumps (expected 2)"; ok=0; }
    [ "$sites" = "2" ] || { echo "FAIL session: $sites sites after session end"; ok=0; }
    [ "$total" = "$((2 * NODES))" ] || \
       { echo "FAIL session: $total total ranks in final log (expected $((2 * NODES)))"; ok=0; }
 
-   [ "$ok" = "1" ] || exit 1
+   [ "$ok" = "1" ] || { session_dump_diagnostics "$dir" "$log"; exit 1; }
    echo "PASS session"
 }
 
@@ -708,7 +734,7 @@ sleep 3
 EOF
    session_test_launch
 
-   verify_cross_exe "$dir" || exit 1
+   verify_cross_exe "$dir" || { session_dump_diagnostics "$dir" "$dir/crash.log"; exit 1; }
    echo "PASS cross-exe"
 }
 
