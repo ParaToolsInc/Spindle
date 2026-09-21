@@ -18,6 +18,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "ldcs_api.h"
 #include "ldcs_audit_server_process.h"
@@ -401,9 +402,11 @@ int handle_client_crash_report(ldcs_process_data_t *procdata,
                                     key, key_len, client->crash_corepath, &e);
 
    if ((procdata->opts & OPT_CRASH_LOG) && e) {
-      crash_log_append_rank(e, display_rank, (int32_t) client->remote_pid);
-      debug_printf2("crash log: recorded local display rank %d pid %d at site '%s' (%d ranks)\n",
-                    (int) display_rank, client->remote_pid, e->site, e->log_ranks_count);
+      crash_log_append_rank(e, display_rank, (int32_t) client->remote_pid,
+                            (int64_t) time(NULL), procdata->hostname,
+                            strlen(procdata->hostname));
+      debug_printf2("crash log: recorded local display rank %d host %s pid %d at site '%s' (%d ranks)\n",
+                    (int) display_rank, procdata->hostname, client->remote_pid, e->site, e->log_ranks_count);
       crash_log_updated(procdata);
    }
    free(key);
@@ -476,7 +479,7 @@ void crash_free_tables(ldcs_process_data_t *procdata)
       for (i = 0; i < procdata->crash_sites_count; ++i) {
          free(procdata->crash_sites[i].site);
          free(procdata->crash_sites[i].exemplar_corepath);
-         free(procdata->crash_sites[i].log_ranks);
+         crash_log_free_ranks(&procdata->crash_sites[i]);
       }
       free(procdata->crash_sites);
       procdata->crash_sites = NULL;

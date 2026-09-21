@@ -132,6 +132,8 @@ typedef struct crash_waiter_t {
 typedef struct {
    int32_t rank;
    int32_t pid;
+   int64_t timestamp;
+   char *hostname;
 } crash_log_rank_t;
 
 typedef struct crash_site_entry_t {

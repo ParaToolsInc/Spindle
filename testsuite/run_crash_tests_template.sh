@@ -364,9 +364,12 @@ read_crash_site() {
 
 # The crash log is CSV with the fields:
 #  - rank
-#  - exemplar
+#  - hostname
+#  - pid
+#  - timestamp
 #  - exe
 #  - site
+#  - exemplar
 #  - corepath
 
 # Check that a crash log exists and starts with the expected header.
@@ -377,7 +380,7 @@ log_check_header() {
       return 1
    fi
    IFS= read -r header <"$log"
-   if [ "$header" != "pid,rank,exemplar,exe,site,corepath" ]; then
+   if [ "$header" != "rank,hostname,pid,timestamp,exe,site,exemplar,corepath" ]; then
       echo "   incorrect crash log header '$header'" >&2
       return 1
    fi
@@ -386,11 +389,12 @@ log_check_header() {
 
 log_rows() { tail -n +2 "$1"; }
 
-# Split a log entry into ROW_PID, ROW_RANK, ROW_EXEMPLAR, ROW_EXE, ROW_SITE,
-# ROW_COREPATH.  The site and corepath fields may be CSV-quoted.
+# Split a log entry into ROW_RANK, ROW_HOST, ROW_PID, ROW_TS, ROW_EXE,
+# ROW_SITE, ROW_EXEMPLAR, ROW_COREPATH.  The site and corepath fields may
+# be CSV-quoted.
 parse_log_row() {
    local rest
-   IFS=, read -r ROW_PID ROW_RANK ROW_EXEMPLAR rest <<<"$1"
+   IFS=, read -r ROW_RANK ROW_HOST ROW_PID ROW_TS rest <<<"$1"
    ROW_EXE="${rest%%,*}"
    rest="${rest#*,}"
    # Remove quoting if present
@@ -402,6 +406,8 @@ parse_log_row() {
       rest="${rest#"$ROW_SITE"}"
       rest="${rest#,}"
    fi
+   ROW_EXEMPLAR="${rest%%,*}"
+   rest="${rest#*,}"
    if [[ "$rest" =~ ^\"(([^\"]|\"\")*)\"$ ]]; then
       ROW_COREPATH="${BASH_REMATCH[1]//\"\"/\"}"
    else
@@ -445,6 +451,14 @@ verify_crash_log() {
          echo "   rank '$ROW_RANK' outside expected range [0,$rank_limit)" >&2
          rc=1
          continue
+      fi
+      if [ -z "$ROW_HOST" ]; then
+         echo "   rank $ROW_RANK: empty hostname" >&2
+         rc=1
+      fi
+      if ! [[ "$ROW_TS" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{4}$ ]]; then
+         echo "   rank $ROW_RANK: timestamp '$ROW_TS' is not of the form YYYY-MM-DDTHH:MM:SS+ZZZZ" >&2
+         rc=1
       fi
       if ! [[ "$ROW_PID" =~ ^[1-9][0-9]*$ ]]; then
          echo "   rank $ROW_RANK: pid '$ROW_PID' is not a positive integer" >&2
