@@ -1265,9 +1265,7 @@ static int handle_exit_broadcast(ldcs_process_data_t *procdata)
    ldcs_message_t out_msg;
    debug_printf("Setting up Exiting after receiving exit bcast message\n");
 
-   /* Write crash logs before exiting */
-   procdata->crash_log_teardown = 1;
-   crash_log_updated(procdata);
+   crash_log_flush_to_parent(procdata);
 
    out_msg.header.type = LDCS_MSG_EXIT;
    out_msg.header.len = 0;

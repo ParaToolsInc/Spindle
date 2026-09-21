@@ -15,10 +15,12 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -224,19 +226,6 @@ void crash_log_flush_to_parent(ldcs_process_data_t *procdata)
    crash_log_clear_pending(procdata);
 }
 
-/* Non-root servers push pending log data to the parent;
-   the root defers the file write until teardown. */
-void crash_log_updated(ldcs_process_data_t *procdata)
-{
-   if (ldcs_audit_server_md_is_responsible(procdata, "")) {
-      if (procdata->crash_log_teardown)
-         crash_log_root_write(procdata);
-   }
-   else {
-      crash_log_flush_to_parent(procdata);
-   }
-}
-
 static void crash_log_merge_entry(ldcs_process_data_t *procdata,
                                   crash_log_entry_t *ent)
 {
@@ -290,7 +279,7 @@ int handle_crash_log_recv(ldcs_process_data_t *procdata,
       crash_log_merge_entry(procdata, &ent);
    }
 
-   crash_log_updated(procdata);
+   crash_log_flush_to_parent(procdata);
    return 0;
 
 malformed:
@@ -352,11 +341,13 @@ static void write_csv_field(FILE *f, const char *s, size_t len)
       fputc('"', f);
 }
 
-/* Write the crash log from the crash log accumulated at the root */
 void crash_log_root_write(ldcs_process_data_t *procdata)
 {
-   int i, nsites = 0;
-   char *tmppath;
+   int i, fd, nsites = 0;
+   struct stat sb;
+   char *buf = NULL;
+   size_t buflen = 0;
+   FILE *f;
 
    if (!(procdata->opts & OPT_CRASH_LOG))
       return;
@@ -374,17 +365,30 @@ void crash_log_root_write(ldcs_process_data_t *procdata)
    if (nsites == 0)
       return;
 
-   tmppath = malloc(strlen(procdata->crash_log) + 5);
-   sprintf(tmppath, "%s.tmp", procdata->crash_log);
-   FILE *f = fopen(tmppath, "w");
-   if (!f) {
-      err_printf("Could not open crash log temp file %s for writing: %s\n",
-                 tmppath, strerror(errno));
-      free(tmppath);
+   fd = open(procdata->crash_log, O_WRONLY | O_CREAT | O_APPEND, 0644);
+   if (fd == -1) {
+      err_printf("Could not open crash log %s for appending: %s\n",
+                 procdata->crash_log, strerror(errno));
+      return;
+   }
+   if (fstat(fd, &sb) != 0) {
+      err_printf("Could not stat crash log %s: %s\n",
+                 procdata->crash_log, strerror(errno));
+      close(fd);
       return;
    }
 
-   fputs(CRASH_LOG_HEADER "\n", f);
+   f = open_memstream(&buf, &buflen);
+   if (!f) {
+      err_printf("Could not allocate crash log buffer: %s\n", strerror(errno));
+      close(fd);
+      return;
+   }
+
+   /* If the crash log is empty (that is, we're the first writer),
+    * write the CSV header. */
+   if (sb.st_size == 0)
+      fputs(CRASH_LOG_HEADER "\n", f);
 
    for (i = 0; i < procdata->crash_sites_count; ++i) {
       crash_site_entry_t *e = &procdata->crash_sites[i];
@@ -416,19 +420,31 @@ void crash_log_root_write(ldcs_process_data_t *procdata)
    }
 
    if (fclose(f) != 0) {
-      err_printf("Error writing crash log %s: %s\n",
-                 tmppath, strerror(errno));
-      unlink(tmppath);
-      free(tmppath);
+      err_printf("Error formatting crash log %s: %s\n",
+                 procdata->crash_log, strerror(errno));
+      free(buf);
+      close(fd);
       return;
    }
-   if (rename(tmppath, procdata->crash_log) != 0) {
-      err_printf("Could not rename crash log %s to %s: %s\n",
-                 tmppath, procdata->crash_log, strerror(errno));
-      unlink(tmppath);
-      free(tmppath);
-      return;
+
+   size_t written = 0;
+   while (written < buflen) {
+      ssize_t n = write(fd, buf + written, buflen - written);
+      if (n == -1 && errno == EINTR)
+         continue;
+      if (n <= 0) {
+         err_printf("Error writing crash log %s: %s\n",
+                    procdata->crash_log, strerror(errno));
+         break;
+      }
+      written += (size_t) n;
    }
-   free(tmppath);
-   debug_printf("crash log: wrote %d sites to %s\n", nsites, procdata->crash_log);
+   free(buf);
+   if (close(fd) != 0)
+      err_printf("Error closing crash log %s: %s\n",
+                 procdata->crash_log, strerror(errno));
+   if (written == buflen)
+      debug_printf("crash log: %s %d sites (%lu bytes) to %s\n",
+                   sb.st_size == 0 ? "wrote new log with" : "appended to log", nsites,
+                   (unsigned long) buflen, procdata->crash_log);
 }

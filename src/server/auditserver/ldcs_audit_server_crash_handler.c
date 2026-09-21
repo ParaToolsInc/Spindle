@@ -407,7 +407,7 @@ int handle_client_crash_report(ldcs_process_data_t *procdata,
                             strlen(procdata->hostname));
       debug_printf2("crash log: recorded local display rank %d host %s pid %d at site '%s' (%d ranks)\n",
                     (int) display_rank, procdata->hostname, client->remote_pid, e->site, e->log_ranks_count);
-      crash_log_updated(procdata);
+      crash_log_flush_to_parent(procdata);
    }
    free(key);
    crash_free_client_stash(client);
