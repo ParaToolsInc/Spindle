@@ -204,14 +204,31 @@ static const char *get_session_options(spank_t spank)
    return NULL;
 }
 
-/* In session mode, point process_spindle_args' merge at the session's options. */
 static void apply_session_options(spank_t spank)
 {
-   const char *opts = get_session_options(spank);
-   if (opts) {
-      sdprintf(2, "Using spindle session options '%s'\n", opts);
+   static int applied = 0;
+   const char *opts;
+   const char *step_opts;
+   char *merged;
+   size_t len;
+
+   if (applied)
+      return;
+   applied = 1;
+   opts = get_session_options(spank);
+   if (!opts)
+      return;
+   sdprintf(2, "Using spindle session options '%s'\n", opts);
+   step_opts = filter_session_optval(user_options);
+   if (!step_opts) {
       user_options = opts;
+      return;
    }
+   len = strlen(opts) + 1 + strlen(step_opts) + 1;
+   merged = (char *) malloc(len);
+   snprintf(merged, len, "%s %s", opts, step_opts);
+   sdprintf(2, "Merged session and step options '%s'\n", merged);
+   user_options = merged;
 }
 
 int slurm_spank_init(spank_t spank, int ac, char *argv[]) {
@@ -599,6 +616,11 @@ int slurm_spank_task_init(spank_t spank, int site_argc, char *site_argv[])
    push_env(spank, &env);
 
    use_session = should_use_session(spank);
+
+   /* In session mode, ensure that the clients get the session's options */
+   if (use_session)
+      apply_session_options(spank);
+
    result = process_spindle_args(spank, site_argc, site_argv, &params, NULL, NULL, use_session);
    if (result == -1) {
       sdprintf(1, "Error processesing spindle arguments.  Aborting spindle\n");
