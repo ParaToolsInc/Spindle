@@ -671,13 +671,59 @@ session_dump_diagnostics() {
    fi
 }
 
-# Session-mode crash-log test
-# two crashing runs inside one spindle session share a crash log.
-run_session_test() {
-   session_test_setup session
-   local dir="$SESSION_DIR" log="$SESSION_LOG"
+# Run one session test attempt: set up a fresh scratch dir, write the
+# test's inner.sh, launch the session, verify.  On failure the attempt's
+# diagnostics are printed.  Sets SESSION_DIR for the caller.
+#   $1 = test name (session | cross-exe), also selects the inner.sh writer
+#   $2 = verifier function, called with the scratch dir
+session_attempt() {
+   local name="$1" verify="$2"
+   session_test_setup "$name"
+   "session_write_inner_${name//-/_}" "$SESSION_DIR" "$SESSION_LOG"
+   session_test_launch
+   "$verify" "$SESSION_DIR" || { session_dump_diagnostics "$SESSION_DIR" "$SESSION_LOG"; return 1; }
+}
 
-   # inner.sh is the script that gets run inside the session
+# After a failed attempt, run the test once more with SPINDLE_DEBUG=2 so
+# the plugin, daemons and clients write spindle_output.* files into the
+# scratch dir, and print a filtered view of them.  The primary run stays
+# undebugged so its behaviour is what CI normally sees; a rerun that
+# passes tells us the failure is timing-sensitive.
+session_debug_rerun() {
+   local name="$1" verify="$2"
+   echo "--- rerunning $name once with SPINDLE_DEBUG=2 to capture plugin, daemon and client logs"
+   (
+      export SPINDLE_DEBUG=2
+      if session_attempt "$name" "$verify"; then
+         echo "--- debug rerun of $name PASSED: the failure is timing-sensitive"
+      else
+         echo "--- debug rerun of $name FAILED"
+      fi
+      session_dump_debug_logs "$SESSION_DIR"
+   )
+}
+
+# Print the interesting lines and the tail of every spindle_output.* file
+# under the scratch dir (one per node from the log daemon, one from the
+# allocator side), bounded so a CI log stays readable.
+session_dump_debug_logs() {
+   local dir="$1" f
+   local keys='error|warning|could not|failed|session options|spindlerunbe|initializing fe|handlestart|handleexit|beginning spindle plugin|finishing spindle plugin|bootstrap_argv\[4\]|crash_handler\.c|crash_report|crash log|exit'
+   local found=0
+   for f in "$dir"/spindle_output.*; do
+      [ -f "$f" ] || continue
+      found=1
+      echo "--- debug log $f ($(wc -l <"$f") lines); key lines:"
+      grep -n -i -E "$keys" "$f" | head -80
+      echo "--- debug log $f; last 30 lines:"
+      tail -n 30 "$f"
+   done
+   [ "$found" = "1" ] || echo "--- no spindle_output.* files under $dir"
+}
+
+# inner.sh for the session test: two crashing runs inside one session.
+session_write_inner_session() {
+   local dir="$1" log="$2"
    cat >"$dir/inner.sh" <<EOF
 #!/bin/bash
 export LD_LIBRARY_PATH="$TESTDIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
@@ -688,8 +734,36 @@ $SESSION_RUN "$TESTDIR/crash_test" --crash-mode sigabrt
 sleep 3
 if [ -e "$log" ]; then echo present; else echo absent; fi > "$dir/log_after_run2"
 EOF
-   session_test_launch
+}
 
+# inner.sh for the cross-exe test: two different executables crashing at
+# the same library offset inside one session.
+session_write_inner_cross_exe() {
+   local dir="$1"
+   cat >"$dir/inner.sh" <<EOF
+#!/bin/bash
+export LD_LIBRARY_PATH="$TESTDIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+$SESSION_RUN "$TESTDIR/crash_test" --crash-mode in-library
+sleep 3
+$SESSION_RUN "$TESTDIR/crash_test_pie" --crash-mode in-library
+sleep 3
+EOF
+}
+
+# Session-mode crash-log test
+# two crashing runs inside one spindle session share a crash log.
+run_session_test() {
+   if session_attempt session verify_session_log; then
+      echo "PASS session"
+      return 0
+   fi
+   session_debug_rerun session verify_session_log
+   exit 1
+}
+
+verify_session_log() {
+   local dir="$1"
+   local log="$dir/crash.log"
    local after1 after2 sites=0 total=0 ncores line
    local -A keys=()
    after1=$(cat "$dir/log_after_run1" 2>/dev/null || echo missing)
@@ -707,35 +781,25 @@ EOF
    local ok=1
    [ "$after1" = "absent" ] || { echo "FAIL session: log $after1 after run 1"; ok=0; }
    [ "$after2" = "absent" ] || { echo "FAIL session: log $after2 after run 2"; ok=0; }
+   # One core per crash site: all-same and sigabrt each dedup to one dump.
    [ "$ncores" = "2" ] || { echo "FAIL session: $ncores coredumps (expected 2)"; ok=0; }
    [ "$sites" = "2" ] || { echo "FAIL session: $sites sites after session end"; ok=0; }
    [ "$total" = "$((2 * NODES))" ] || \
       { echo "FAIL session: $total total ranks in final log (expected $((2 * NODES)))"; ok=0; }
 
-   [ "$ok" = "1" ] || { session_dump_diagnostics "$dir" "$log"; exit 1; }
-   echo "PASS session"
+   [ "$ok" = "1" ]
 }
 
 # Cross-executable dedup test: two different executables crashing
 # at the same offset in the same shared library inside one session
 # should not be deduplicated
 run_cross_exe_test() {
-   session_test_setup cross-exe
-   local dir="$SESSION_DIR"
-
-   # inner.sh is the script that gets run inside the session
-   cat >"$dir/inner.sh" <<EOF
-#!/bin/bash
-export LD_LIBRARY_PATH="$TESTDIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-$SESSION_RUN "$TESTDIR/crash_test" --crash-mode in-library
-sleep 3
-$SESSION_RUN "$TESTDIR/crash_test_pie" --crash-mode in-library
-sleep 3
-EOF
-   session_test_launch
-
-   verify_cross_exe "$dir" || { session_dump_diagnostics "$dir" "$dir/crash.log"; exit 1; }
-   echo "PASS cross-exe"
+   if session_attempt cross-exe verify_cross_exe; then
+      echo "PASS cross-exe"
+      return 0
+   fi
+   session_debug_rerun cross-exe verify_cross_exe
+   exit 1
 }
 
 verify_cross_exe() {
