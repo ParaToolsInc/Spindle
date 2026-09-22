@@ -20,4 +20,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 /* Install Spindle's coredump-deduplicating signal handler. */
 int crash_handler_install(int global_rank, int ldcsid);
 
+/* Refresh the handler's cached connection state in a child. */
+int crash_handler_reset(int global_rank, int ldcsid);
+
 #endif

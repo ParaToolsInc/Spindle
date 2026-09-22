@@ -67,6 +67,7 @@ struct app_disposition {
    int flags;
    int has_sigaction;
    int active;
+   int ignored;
 };
 
 static const int OWNED_SIGS[] = { SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT };
@@ -98,16 +99,24 @@ static void crash_disp_unlock(int sig)
    __sync_lock_release(&disp_lock[sig]);
 }
 
+void crash_sigchain_reset_locks(void)
+{
+   int sig;
+   for (sig = 0; sig < NSIG; sig++)
+      __sync_lock_release(&disp_lock[sig]);
+}
+
 /* Caller must hold disp lock for signal */
 static void store_disposition(int sig, const struct sigaction *act)
 {
    if (act == NULL) return;
    struct app_disposition *d = &disp_store[sig];
-   if (!(act->sa_flags & SA_SIGINFO) &&
-       (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN)) {
+   if (act->sa_handler == SIG_DFL || act->sa_handler == SIG_IGN) {
       d->active = 0;
+      d->ignored = (act->sa_handler == SIG_IGN);
       return;
    }
+   d->ignored = 0;
    d->has_sigaction = (act->sa_flags & SA_SIGINFO) ? 1 : 0;
    if (d->has_sigaction) {
       d->sigaction_fn = act->sa_sigaction;
@@ -127,7 +136,7 @@ static void get_disposition(int sig, struct sigaction *out)
    struct app_disposition *d = &disp_store[sig];
    memset(out, 0, sizeof *out);
    if (!d->active) {
-      out->sa_handler = SIG_DFL;
+      out->sa_handler = d->ignored ? SIG_IGN : SIG_DFL;
       return;
    }
    if (d->has_sigaction) {
@@ -152,9 +161,11 @@ void crash_sigchain_register_existing_handler(int sig, const struct sigaction *h
    debug_printf2("stored application signal handler for sig %d\n", sig);
 }
 
-/* Run the application signal handler, if present.
-   Returns 0 if there was no handler to run, 1 if there was an application
-   handler and we successfully ran it and returned from it. */
+/* Run the application signal handler, if present.  Returns 
+     - CRASH_CHAIN_NONE if the disposition is SIG_DFL
+     - CRASH_CHAIN_IGNORED if it is SIG_IGN
+     - CRASH_CHAIN_HANDLED if there was an application handler 
+       and we successfully ran it and returned from it. */
 int crash_sigchain_chain_to_app(int sig, siginfo_t *info, void *ucontext)
 {
    struct app_disposition local;
@@ -163,8 +174,9 @@ int crash_sigchain_chain_to_app(int sig, siginfo_t *info, void *ucontext)
 
    /* If there's no application handler, nothing more for us to do */
    if (!disp_store[sig].active) {
+      int ignored = disp_store[sig].ignored;
       crash_disp_unlock(sig);
-      return 0;
+      return ignored ? CRASH_CHAIN_IGNORED : CRASH_CHAIN_NONE;
    }
 
    /* Make a local copy of the signal disposition so we can release the lock
@@ -193,7 +205,7 @@ int crash_sigchain_chain_to_app(int sig, siginfo_t *info, void *ucontext)
    /* If we reach here, the application handler returned.
     Restore the mask to its previous value. */
    (void) sigprocmask(SIG_SETMASK, &saved, NULL);
-   return 1;
+   return CRASH_CHAIN_HANDLED;
 }
 
 /* Fault resolution detection
@@ -244,13 +256,18 @@ static inline int crash_probe_byte_readable(const void *addr)
 #ifdef PROCMAP_QUERY
 /* On Linux 6.11 and later, we can read /proc/self/maps via ioctl
    instead of having to parse it ourselves. */
-static inline int crash_maps_check_writable_via_ioctl(int fd, uintptr_t addr)
+static inline int crash_maps_find_via_ioctl(int fd, uintptr_t addr,
+                                            struct crash_map *map)
 {
    struct procmap_query q;
    memset(&q, 0, sizeof q);
    q.size = sizeof q;
    q.query_addr = (uint64_t) addr;
    q.query_flags = 0;
+   if (map->path) {
+      q.vma_name_addr = (uint64_t) (uintptr_t) map->path;
+      q.vma_name_size = map->path_size;
+   }
    int rc;
    do {
       rc = ioctl(fd, PROCMAP_QUERY, &q);
@@ -260,7 +277,13 @@ static inline int crash_maps_check_writable_via_ioctl(int fd, uintptr_t addr)
          return 0;
       return -1;
    }
-   return (q.vma_flags & PROCMAP_QUERY_VMA_WRITABLE) ? 1 : 0;
+   map->start = q.vma_start;
+   map->end = q.vma_end;
+   map->offset = q.vma_offset;
+   map->writable = (q.vma_flags & PROCMAP_QUERY_VMA_WRITABLE) ? 1 : 0;
+   if (map->path && q.vma_name_size == 0)
+      map->path[0] = '\0';
+   return 1;
 }
 #endif /* PROCMAP_QUERY */
 
@@ -277,29 +300,34 @@ static inline int hexval(char c)
    return -1;
 }
 
-/* Parse /proc/self/maps looking for the range containing addr, checking
-   whether it is writable.  Returns 1 if writable, 0 if not writable or
-   not mapped, and -1 on error. */
-static int crash_maps_check_writable_via_textparse(int fd, uintptr_t addr)
+/* Parse /proc/self/maps looking for the range containing addr.
+   Lines look like
+      start-end perms offset dev inode      path
+   Returns 1 if found, 0 if not mapped, and -1 on error. */
+static int crash_maps_find_via_textparse(int fd, uintptr_t addr,
+                                         struct crash_map *map)
 {
    const size_t buf_size = 4096;
-   char *buf = (char *) mmap(NULL, buf_size,
-                             PROT_READ | PROT_WRITE,
-                             MAP_PRIVATE | MAP_ANONYMOUS,
-                             -1, 0);
+   char *buf = (char *) syscall(SYS_mmap, NULL, buf_size,
+                                PROT_READ | PROT_WRITE,
+                                MAP_PRIVATE | MAP_ANONYMOUS,
+                                -1, 0);
    if (buf == MAP_FAILED)
       return -1;
 
-   enum { ADDR_START, ADDR_END, PERMS, SKIP_EOL } state = ADDR_START;
+   enum { ADDR_START, ADDR_END, PERMS, SKIP_PERMS, OFFSET, DEV_INODE,
+          PATH_START, PATH, SKIP_EOL } state = ADDR_START;
    uintptr_t start = 0, end = 0;
-   int perm_idx = 0, writable = 0;
+   unsigned long offset = 0;
+   int perm_idx = 0, writable = 0, spaces = 0;
+   size_t path_len = 0;
    int result = 0;
    int done = 0;
 
    while (!done) {
       ssize_t n;
-      do { 
-          n = read(fd, buf, buf_size); 
+      do {
+          n = syscall(SYS_read, fd, buf, buf_size);
       } while (n < 0 && errno == EINTR);
       if (n < 0) { 
           result = -1;
@@ -340,12 +368,43 @@ static int crash_maps_check_writable_via_textparse(int fd, uintptr_t addr)
                 if (start > addr) {
                     done = 1;
                 } else if (addr < end) {
-                    result = writable;
-                    done = 1;
+                    /* Found it. */
+                    result = 1;
+                    state = SKIP_PERMS;
                 } else {
                     state = SKIP_EOL;
                 }
             }
+            break;
+         case SKIP_PERMS:
+            if (c == ' ')
+                state = OFFSET;
+            break;
+         case OFFSET:
+            if (c == ' ')
+                state = DEV_INODE;
+            else
+                /* Accumulate one hex digit at at time */
+                offset = (offset << 4) | hexval(c);
+            break;
+         case DEV_INODE:
+            /* Skip the dev and inode fields */
+            if (c == ' ' && ++spaces == 2)
+                state = PATH_START;
+            break;
+         case PATH_START:
+            /* The path is padded with spaces, and absent for anonymous memory */
+            if (c == ' ')
+                break;
+            state = PATH;
+            /* fall through */
+         case PATH:
+            if (c == '\n')
+                done = 1;
+            else if (map->path && path_len + 1 < map->path_size)
+                map->path[path_len++] = c;
+            else
+                path_len = map->path_size;
             break;
          case SKIP_EOL:
             if (c == '\n') {
@@ -359,8 +418,33 @@ static int crash_maps_check_writable_via_textparse(int fd, uintptr_t addr)
       }
    }
 
-   (void) munmap(buf, buf_size);
+   (void) syscall(SYS_munmap, buf, buf_size);
+   if (result == 1) {
+      map->start = start;
+      map->end = end;
+      map->offset = offset;
+      map->writable = writable;
+      if (map->path)
+         map->path[path_len < map->path_size ? path_len : 0] = '\0';
+   }
    return result;
+}
+
+int crash_maps_find(uintptr_t addr, struct crash_map *map)
+{
+   int fd = syscall(SYS_openat, AT_FDCWD, "/proc/self/maps", O_RDONLY | O_CLOEXEC);
+   if (fd < 0) return -1;
+
+   int rc;
+#ifdef PROCMAP_QUERY
+   if (crash_maps_query_supported)
+      rc = crash_maps_find_via_ioctl(fd, addr, map);
+   else
+#endif
+      rc = crash_maps_find_via_textparse(fd, addr, map);
+
+   (void) syscall(SYS_close, fd);
+   return rc;
 }
 
 /* Probe whether addr is writable in this process by checking
@@ -373,19 +457,11 @@ static int crash_maps_check_writable_via_textparse(int fd, uintptr_t addr)
   */
 static inline int crash_maps_check_writable(uintptr_t addr)
 {
-   int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
-   if (fd < 0) return -1;
-
-   int rc;
-#ifdef PROCMAP_QUERY
-   if (crash_maps_query_supported)
-      rc = crash_maps_check_writable_via_ioctl(fd, addr);
-   else
-#endif
-      rc = crash_maps_check_writable_via_textparse(fd, addr);
-
-   (void) close(fd);
-   return rc;
+   struct crash_map map = { 0 };
+   int rc = crash_maps_find(addr, &map);
+   if (rc != 1)
+      return rc;
+   return map.writable;
 }
 
 void crash_sigchain_init(void)
@@ -393,7 +469,8 @@ void crash_sigchain_init(void)
 #ifdef PROCMAP_QUERY
    int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
    if (fd >= 0) {
-      if (crash_maps_check_writable_via_ioctl(fd, (uintptr_t) &crash_maps_query_supported) == 1)
+      struct crash_map map = { 0 };
+      if (crash_maps_find_via_ioctl(fd, (uintptr_t) &crash_maps_query_supported, &map) == 1)
          crash_maps_query_supported = 1;
       (void) close(fd);
    }
@@ -404,7 +481,7 @@ void crash_sigchain_init(void)
 int crash_sigchain_fault_resolved(int sig, siginfo_t *info, void *uctx,
                                   unsigned long pc_before)
 {
-   /* PC advanced inside the application handled. */
+   /* PC advanced inside the application handler. */
    if (extract_pc(uctx) != pc_before)
       return 1;
 
@@ -413,11 +490,20 @@ int crash_sigchain_fault_resolved(int sig, siginfo_t *info, void *uctx,
    if (sig != SIGSEGV && sig != SIGBUS)
       return 1;
 
+   /* A user-sent signal has no faulting instruction to retry.
+      Rather, the application handler returning consumes it. */
+   if (info->si_code <= 0)
+      return 1;
+
    /* If we faulted on a write, check if the address is now mapped writable.
       If we faulted on a read, retry the read and check if we refault. */
    int rc = pf_is_write(uctx) ? crash_maps_check_writable((uintptr_t) info->si_addr)
                               : crash_probe_byte_readable(info->si_addr);
-   return (rc == 1) ? 1 : 0;
+
+   /* Only a probe that positively saw the fault still present (0) means
+      unresolved.  If the probe itself could not run, treat as handled,
+      which preserves the behavior without Spindle. */
+   return rc != 0;
 }
 
 /* sigaction-family wrappers */

@@ -40,6 +40,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
  *                  crashes inside dlopen; others exit cleanly
  *   span-read      no app handler; a read spans two pages (PROT_READ then
  *                  PROT_NONE) and faults in the second page
+ *   kill-segv      app sends SIGSEGV to itself via kill()
  *
  * SIGABRT modes:
  *   sigabrt        every rank calls abort()
@@ -72,8 +73,45 @@ Place, Suite 330, Boston, MA 02111-1307 USA
  *                  app handler does not fix access past the end of an mmap'ed file
  *   mmap-sigbus-fixed
  *                  app handler fixes access past the end of an mmap'ed file by extending it
+ *   chained-kill-segv
+ *                  app handler handles a kill()-sent SIGSEGV and returns
+ *   ignored-kill-segv
+ *                  app sets SIGSEGV disposition to SIG_IGN via signal()
+ *                  then kill()s itself with SIGSEGV
+ *   ignored-siginfo-kill-segv
+ *                  app sets SIGSEGV disposition to SIG_IGN via sigaction()
+ *                  then kill()s itself with SIGSEGV
+ *   default-siginfo-kill-segv
+ *                  app explicitly sets SIG_DFL via sigaction() with SA_SIGINFO
+ *                  then kill()s itself with SIGSEGV
+ *
+ * Fork modes.  
+ *   fork-child-prereconnect
+ *                  child sets core limit to zero and crashes at
+ *                  crash_function_A before making any call Spindle intercepts; 
+ *                  parent waits, then crashes at the same site
+ *   fork-child-reconnect
+ *                  child makes an intercepted call, which reconnects it
+ *                  with OPT_FOLLOWFORK and crashes at crash_function_A;
+ *                  parent exits cleanly 
+ *   fork-child-reconnect-then-parent
+ *                  as fork-child-reconnect, but the parent then crashes at
+ *                  the same site
+ *   fork-child-nofollow
+ *                  child makes an intercepted call but does not reconnect when
+ *                  run with --follow-fork=false
+ *   fork-child-inherited-safepoint
+ *                  parent installs safepoint handler before forking; parent 
+ *                  and child recover from safepoint faults through the handler
+ *   fork-exec-child-crash
+ *                  child execs this program with --crash-mode
+ *                  all-same-no-mpi; parent exits cleanly.
+ *   all-same-no-mpi
+ *                  crashes in crash_function_A without calling MPI_Init or
+ *                  creating a per-rank directory
  *
  *   no-crash       every rank exits cleanly
+ *
  */
 
 #define _GNU_SOURCE
@@ -87,8 +125,11 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <signal.h>
 #include <setjmp.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <assert.h>
 #include <pthread.h>
@@ -106,13 +147,18 @@ static void usage(const char *prog) {
             "late-straggler|two-groups|one-crashes|in-library|"
             "in-dlmopen-library|in-fixed-library|in-fixed-dlmopen-library|"
             "in-library-ctor|sigabrt|assert|"
-            "long-assert|mixed-abort-segv|span-read|"
+            "long-assert|mixed-abort-segv|kill-segv|span-read|"
             "safepoint|safepoint-then-crash|"
             "safepoint-bad|safepoint-bad-write|safepoint-fix-write|"
             "safepoint-span-read|safepoint-span-write|"
             "safepoint-span-bad-read|safepoint-span-bad-write|"
-            "mmap-sigbus-bad|mmap-sigbus-fixed|"
-            "safepoint-longjmp|safepoint-longjmp-mt|safepoint-concurrent-chain|no-crash}"
+            "mmap-sigbus-bad|mmap-sigbus-fixed|chained-kill-segv|"
+            "ignored-kill-segv|ignored-siginfo-kill-segv|default-siginfo-kill-segv|"
+            "safepoint-longjmp|safepoint-longjmp-mt|safepoint-concurrent-chain|"
+            "fork-child-prereconnect|fork-child-reconnect|"
+            "fork-child-reconnect-then-parent|fork-child-nofollow|"
+            "fork-child-inherited-safepoint|fork-exec-child-crash|"
+            "all-same-no-mpi|no-crash}"
             " [--sleep <seconds>] [--cycles <n>]\n",
             prog);
 }
@@ -224,6 +270,12 @@ static void do_mixed_abort_segv(int rank) {
     } else {
         *(volatile int *) 0 = 0;
     }
+}
+
+static void do_kill_segv(int rank) {
+    kill(getpid(), SIGSEGV);
+    fprintf(stderr, "kill-segv rank=%d: unexpectedly continued after kill(SIGSEGV)\n", rank);
+    _exit(SAFEPOINT_RC_NOT_TERMINATED);
 }
 
 static void do_span_read(int rank) {
@@ -674,11 +726,281 @@ static int do_mmap_sigbus_bad(int rank) {
     return SAFEPOINT_RC_NOT_TERMINATED;
 }
 
+static void chained_kill_handler(int sig, siginfo_t *info, void *uctx) {
+    (void) sig; (void) uctx;
+    if (info == NULL || info->si_code > 0)
+        handler_die("chained-kill-segv: handler unexpectedly got a kernel fault\n");
+    safepoint_handler_invocations++;
+}
+
+static int do_chained_kill_segv(int rank) {
+    if (install_sigsegv_handler(chained_kill_handler, "chained-kill-segv", rank) != 0)
+        return SAFEPOINT_RC_SETUP_FAILED;
+
+    kill(getpid(), SIGSEGV);
+
+    if (safepoint_handler_invocations != 1) {
+        fprintf(stderr, "chained-kill-segv rank=%d: handler invoked %d times\n",
+                rank, safepoint_handler_invocations);
+        return SAFEPOINT_RC_INCOMPLETE;
+    }
+    fprintf(stderr, "chained-kill-segv rank=%d: correctly survived handled kill(SIGSEGV)\n",
+            rank);
+    return 0;
+}
+
+/* Install a special disposition (SIG_IGN or SIG_DFL) for SIGSEGV through
+   sigaction() with the given flags, then read it back and check that the
+   same value is returned. This tests Spindle's sigaction wrapper. */
+static int install_special_sigsegv(void *disposition, int flags,
+                                   const char *mode, int rank) {
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = (void (*)(int)) disposition;
+    sa.sa_flags = flags;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGSEGV, &sa, NULL) != 0) {
+        fprintf(stderr, "%s rank=%d: sigaction failed\n", mode, rank);
+        return -1;
+    }
+    memset(&old, 0, sizeof old);
+    if (sigaction(SIGSEGV, NULL, &old) != 0) {
+        fprintf(stderr, "%s rank=%d: sigaction readback failed\n", mode, rank);
+        return -1;
+    }
+    if ((void *) old.sa_handler != disposition) {
+        fprintf(stderr, "%s rank=%d: disposition read back was different from expected: installed %p, read back %p\n",
+                mode, rank, disposition, (void *) old.sa_handler);
+        return -1;
+    }
+    return 0;
+}
+
+/* A SIGSEGV sent via kill() with SIG_IGN set should be discarded. */
+static int do_ignored_kill_segv_common(const char *mode, int rank, int use_siginfo) {
+    if (use_siginfo) {
+        if (install_special_sigsegv((void *) SIG_IGN, SA_SIGINFO, mode, rank) != 0)
+            return SAFEPOINT_RC_SETUP_FAILED;
+    } else {
+        if (signal(SIGSEGV, SIG_IGN) == SIG_ERR) {
+            fprintf(stderr, "%s rank=%d: signal(SIGSEGV, SIG_IGN) failed\n", mode, rank);
+            return SAFEPOINT_RC_SETUP_FAILED;
+        }
+    }
+
+    /* Send SIGSEGV to ourself; SIG_IGN is set, so this is expected to return. */
+    kill(getpid(), SIGSEGV);
+
+    struct sigaction old;
+    memset(&old, 0, sizeof old);
+    if (sigaction(SIGSEGV, NULL, &old) != 0) {
+        fprintf(stderr, "%s rank=%d: sigaction readback failed\n", mode, rank);
+        return SAFEPOINT_RC_INCOMPLETE;
+    }
+    if (old.sa_handler != SIG_IGN) {
+        fprintf(stderr, "%s rank=%d: unexpectedly got value other than SIG_IGN: got %p\n",
+                mode, rank, (void *) old.sa_handler);
+        return SAFEPOINT_RC_INCOMPLETE;
+    }
+    fprintf(stderr, "%s rank=%d: correctly survived ignored kill(SIGSEGV)\n", mode, rank);
+    return 0;
+}
+
+static int do_ignored_kill_segv(int rank) {
+    return do_ignored_kill_segv_common("ignored-kill-segv", rank, 0);
+}
+
+static int do_ignored_siginfo_kill_segv(int rank) {
+    return do_ignored_kill_segv_common("ignored-siginfo-kill-segv", rank, 1);
+}
+
+/* Verify that explicitly setting SIG_DFL with SA_SIGINFO still
+   produces the default disposition. */
+static void do_default_siginfo_kill_segv(int rank) {
+    if (install_special_sigsegv((void *) SIG_DFL, SA_SIGINFO,
+                                "default-siginfo-kill-segv", rank) != 0)
+        _exit(SAFEPOINT_RC_SETUP_FAILED);
+    kill(getpid(), SIGSEGV);
+    fprintf(stderr, "default-siginfo-kill-segv rank=%d: unexpectedly continued after kill(SIGSEGV)\n", rank);
+    _exit(SAFEPOINT_RC_NOT_TERMINATED);
+}
+
+/* Fork modes. */
+
+static const char *crash_test_argv0;
+
+static void child_banner(const char *mode, int rank, int size) {
+    fprintf(stderr, "crash_test rank=%d size=%d mode=%s pid=%d (fork child)\n",
+            rank, size, mode, (int) getpid());
+    fflush(stderr);
+}
+
+/* An intercepted call to cause the child to reconnect. */
+static void child_intercepted_call(const char *mode, int rank) {
+    int fd = open("/dev/null", O_RDONLY);
+    if (fd < 0) {
+        fprintf(stderr, "%s rank=%d: child open(/dev/null) failed\n", mode, rank);
+        _exit(SAFEPOINT_RC_SETUP_FAILED);
+    }
+    close(fd);
+}
+
+static void child_disable_core(const char *mode, int rank) {
+    struct rlimit no_core = { 0, 0 };
+    if (setrlimit(RLIMIT_CORE, &no_core) != 0) {
+        fprintf(stderr, "%s rank=%d: child setrlimit failed\n", mode, rank);
+        _exit(SAFEPOINT_RC_SETUP_FAILED);
+    }
+}
+
+static int wait_for_segv(const char *mode, int rank, pid_t child) {
+    int status = 0;
+    if (waitpid(child, &status, 0) != child) {
+        fprintf(stderr, "%s rank=%d: waitpid failed\n", mode, rank);
+        return -1;
+    }
+    if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGSEGV) {
+        fprintf(stderr, "%s rank=%d: child did not die by SIGSEGV (status 0x%x)\n",
+                mode, rank, status);
+        return -1;
+    }
+    fprintf(stderr, "%s rank=%d: child died by SIGSEGV\n", mode, rank);
+    return 0;
+}
+
+static pid_t fork_or_die(const char *mode, int rank) {
+    pid_t child = fork();
+    if (child < 0) {
+        fprintf(stderr, "%s rank=%d: fork failed\n", mode, rank);
+        _exit(SAFEPOINT_RC_SETUP_FAILED);
+    }
+    return child;
+}
+
+/* Child crashes without a reconnect opportunity.
+   The crash in the child will be ignored by Spindle. */
+static void do_fork_child_prereconnect(int rank) {
+    const char *mode = "fork-child-prereconnect";
+    pid_t child = fork_or_die(mode, rank);
+    if (child == 0) {
+        child_disable_core(mode, rank);
+        crash_function_A(rank);
+        _exit(SAFEPOINT_RC_NOT_TERMINATED);
+    }
+    if (wait_for_segv(mode, rank, child) != 0)
+        _exit(SAFEPOINT_RC_INCOMPLETE);
+    crash_function_A(rank);
+    _exit(SAFEPOINT_RC_NOT_TERMINATED);
+}
+
+/* Fork a child that performs a Spindle-intercepted call to allow
+   reconnection, then crashes at crash_function_A. */
+static int fork_reconnecting_crasher(const char *mode, int rank, int size) {
+    pid_t child = fork_or_die(mode, rank);
+    if (child == 0) {
+        child_intercepted_call(mode, rank);
+        child_banner(mode, rank, size);
+        crash_function_A(rank);
+        _exit(SAFEPOINT_RC_NOT_TERMINATED);
+    }
+    if (wait_for_segv(mode, rank, child) != 0)
+        return SAFEPOINT_RC_INCOMPLETE;
+    return 0;
+}
+
+/* Child reconnects, then crashes while the parent exits cleanly. */
+static int do_fork_child_reconnect(int rank, int size) {
+    return fork_reconnecting_crasher("fork-child-reconnect", rank, size);
+}
+
+/* Child reconnects and crashes, then the parent crashes at the same site. */
+static void do_fork_child_reconnect_then_parent(int rank, int size) {
+    const char *mode = "fork-child-reconnect-then-parent";
+    if (fork_reconnecting_crasher(mode, rank, size) != 0)
+        _exit(SAFEPOINT_RC_INCOMPLETE);
+    crash_function_A(rank);
+    _exit(SAFEPOINT_RC_NOT_TERMINATED);
+}
+
+/* Meant to run with --follow-fork=false */
+static void do_fork_child_nofollow(int rank) {
+    const char *mode = "fork-child-nofollow";
+    pid_t child = fork_or_die(mode, rank);
+    if (child == 0) {
+        child_intercepted_call(mode, rank);
+        child_disable_core(mode, rank);
+        crash_function_A(rank);
+        _exit(SAFEPOINT_RC_NOT_TERMINATED);
+    }
+    if (wait_for_segv(mode, rank, child) != 0)
+        _exit(SAFEPOINT_RC_INCOMPLETE);
+    crash_function_A(rank);
+    _exit(SAFEPOINT_RC_NOT_TERMINATED);
+}
+
+/* Fault on the safepoint page `cycles` times. */
+static int safepoint_cycles_inherited(const char *mode, int rank, int cycles) {
+    for (int i = 0; i < cycles; i++) {
+        if (mprotect(safepoint_page, safepoint_pagesize, PROT_NONE) != 0) {
+            fprintf(stderr, "%s rank=%d cycle=%d: mprotect PROT_NONE failed\n",
+                    mode, rank, i);
+            return SAFEPOINT_RC_SETUP_FAILED;
+        }
+        volatile int v = *(volatile int *) safepoint_page;
+        (void) v;
+    }
+    return 0;
+}
+
+static int do_fork_child_inherited_safepoint(int rank, int cycles) {
+    const char *mode = "fork-child-inherited-safepoint";
+    int rc = setup_safepoint(mode, rank, safepoint_sigsegv_handler);
+    if (rc)
+        return rc;
+    pid_t child = fork_or_die(mode, rank);
+    if (child == 0) {
+        rc = safepoint_cycles_inherited(mode, rank, cycles);
+        if (rc == 0 && safepoint_handler_invocations < cycles)
+            rc = SAFEPOINT_RC_INCOMPLETE;
+        fprintf(stderr, "%s rank=%d: child completed %d cycles, %d invocations, rc=%d\n",
+                mode, rank, cycles, safepoint_handler_invocations, rc);
+        _exit(rc);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "%s rank=%d: child failed (status 0x%x)\n", mode, rank, status);
+        return SAFEPOINT_RC_INCOMPLETE;
+    }
+    rc = safepoint_cycles_inherited(mode, rank, cycles);
+    if (rc)
+        return rc;
+    return safepoint_result(mode, rank, cycles);
+}
+
+/* Child execs this program in the all-same-no-mpi mode and crashes there. */
+static int do_fork_exec_child_crash(int rank, int size) {
+    const char *mode = "fork-exec-child-crash";
+    (void) size;
+    pid_t child = fork_or_die(mode, rank);
+    if (child == 0) {
+        execl(crash_test_argv0, crash_test_argv0,
+              "--crash-mode", "all-same-no-mpi", (char *) NULL);
+        fprintf(stderr, "%s rank=%d: execl(%s) failed\n", mode, rank, crash_test_argv0);
+        _exit(SAFEPOINT_RC_SETUP_FAILED);
+    }
+    if (wait_for_segv(mode, rank, child) != 0)
+        return SAFEPOINT_RC_INCOMPLETE;
+    return 0;
+}
+
 static int sleep_seconds    = 10;
 static int safepoint_cycles = SAFEPOINT_CYCLES_DEFAULT;
 
 int main(int argc, char **argv) {
     const char *mode = NULL;
+    int rank = 0, size = 1;
+    crash_test_argv0 = argv[0];
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--crash-mode") == 0 && i + 1 < argc) {
             mode = argv[++i];
@@ -706,8 +1028,16 @@ int main(int argc, char **argv) {
         return 2;
     }
 
+    if (strcmp(mode, "all-same-no-mpi") == 0) {
+        fprintf(stderr, "crash_test mode=%s pid=%d (exec child)\n",
+                mode, (int) getpid());
+        fflush(stderr);
+        crash_function_A(0);
+        fprintf(stderr, "all-same-no-mpi: unexpectedly continued\n");
+        return SAFEPOINT_RC_NOT_TERMINATED;
+    }
+
     MPI_Init(&argc, &argv);
-    int rank = 0, size = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
@@ -784,6 +1114,8 @@ int main(int argc, char **argv) {
         do_assert(rank);
     } else if (strcmp(mode, "mixed-abort-segv") == 0) {
         do_mixed_abort_segv(rank);
+    } else if (strcmp(mode, "kill-segv") == 0) {
+        do_kill_segv(rank);
     } else if (strcmp(mode, "span-read") == 0) {
         do_span_read(rank);
     } else if (strcmp(mode, "safepoint") == 0) {
@@ -820,6 +1152,38 @@ int main(int argc, char **argv) {
         return do_mmap_sigbus_bad(rank);
     } else if (strcmp(mode, "mmap-sigbus-fixed") == 0) {
         int rc = do_mmap_sigbus_fixed(rank);
+        MPI_Finalize();
+        return rc;
+    } else if (strcmp(mode, "chained-kill-segv") == 0) {
+        int rc = do_chained_kill_segv(rank);
+        MPI_Finalize();
+        return rc;
+    } else if (strcmp(mode, "ignored-kill-segv") == 0) {
+        int rc = do_ignored_kill_segv(rank);
+        MPI_Finalize();
+        return rc;
+    } else if (strcmp(mode, "ignored-siginfo-kill-segv") == 0) {
+        int rc = do_ignored_siginfo_kill_segv(rank);
+        MPI_Finalize();
+        return rc;
+    } else if (strcmp(mode, "default-siginfo-kill-segv") == 0) {
+        do_default_siginfo_kill_segv(rank);
+    } else if (strcmp(mode, "fork-child-prereconnect") == 0) {
+        do_fork_child_prereconnect(rank);
+    } else if (strcmp(mode, "fork-child-reconnect") == 0) {
+        int rc = do_fork_child_reconnect(rank, size);
+        MPI_Finalize();
+        return rc;
+    } else if (strcmp(mode, "fork-child-reconnect-then-parent") == 0) {
+        do_fork_child_reconnect_then_parent(rank, size);
+    } else if (strcmp(mode, "fork-child-nofollow") == 0) {
+        do_fork_child_nofollow(rank);
+    } else if (strcmp(mode, "fork-child-inherited-safepoint") == 0) {
+        int rc = do_fork_child_inherited_safepoint(rank, safepoint_cycles);
+        MPI_Finalize();
+        return rc;
+    } else if (strcmp(mode, "fork-exec-child-crash") == 0) {
+        int rc = do_fork_exec_child_crash(rank, size);
         MPI_Finalize();
         return rc;
     } else if (strcmp(mode, "no-crash") == 0) {

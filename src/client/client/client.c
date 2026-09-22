@@ -36,6 +36,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "client_heap.h"
 #include "client_api.h"
 #include "crash_handler.h"
+#include "crash_sigchain.h"
 #include "spindle_launch.h"
 #include "shmcache.h"
 #include "ccwarns.h"
@@ -193,6 +194,7 @@ static int init_server_connection()
 {
    char *connection, *rankinfo_s, *opts_s, *cachesize_s;
    int old_ldcsid;
+   int result = 0;
 
    debug_printf("Initializing connection to server\n");
 
@@ -258,7 +260,8 @@ static int init_server_connection()
 
       send_pid(ldcsid);
       send_location(ldcsid, commpath);
-      send_rankinfo_query(ldcsid, rankinfo+0, rankinfo+1, rankinfo+2, rankinfo+3);
+      if (send_rankinfo_query(ldcsid, rankinfo+0, rankinfo+1, rankinfo+2, rankinfo+3) != 0)
+         result = -1;
 #if defined(LIBNUMA)      
       if (opts & OPT_NUMA)
          send_cpu(ldcsid, get_cur_cpu());
@@ -275,17 +278,17 @@ static int init_server_connection()
 
    if (opts & OPT_RELOCPY)
       parse_python_prefixes(ldcsid);
-   return 0;
+   return result;
 }
 
-static void reset_server_connection()
+static int reset_server_connection()
 {
    client_close_connection(ldcsid);
 
    ldcsid = -1;
    old_cwd[0] = '\0';
 
-   init_server_connection();
+   return init_server_connection();
 }
 
 void check_for_fork()
@@ -302,6 +305,16 @@ void check_for_fork()
       return;
    }
 
+   /* Reset Spindle's locks. Any threads other than the forking one disappear 
+    * at fork, and Spindle would deadlock if any disappeared thread holds
+    * a lock. */
+   reset_lock(&heap_lock);
+   reset_comm_lock();
+   crash_sigchain_reset_locks();
+   /* The debug log's FILE lock lives in this namespace's libc and is
+      inherited the same way, so reopen the log before printing anything. */
+   reset_spindle_debugging();
+
    if (!(opts & OPT_FOLLOWFORK)) {
       debug_printf("Client %d forked and is now process %d.  Not following fork.\n", cached_pid, current_pid);
       use_ldcs = 0;
@@ -310,8 +323,19 @@ void check_for_fork()
    }
    debug_printf("Client %d forked and is now process %d.  Following.\n", cached_pid, current_pid);
    cached_pid = current_pid;
-   reset_spindle_debugging();
-   reset_server_connection();
+   int result = reset_server_connection();
+
+   /* The inherited crash handler still holds the parent's connection
+      state and bypasses dedup until told about the new one. */
+   if (opts & OPT_CRASH_HANDLER) {
+      if (result == 0 && ldcsid >= 0) {
+         int global_rank = rankinfo[0] * rankinfo[3] + rankinfo[2];
+         (void) crash_handler_reset(global_rank, ldcsid);
+      }
+      else {
+         debug_printf("could not reset crash handler for child %d \n", current_pid);
+      }
+   }
 }
 
 void test_log(const char *name)

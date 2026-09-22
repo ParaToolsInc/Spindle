@@ -19,13 +19,31 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 
 #include <signal.h>
 #include <stddef.h>
+#include <stdint.h>
+
+/* Return values of crash_sigchain_chain_to_app */
+#define CRASH_CHAIN_NONE     0  /* no application handler */
+#define CRASH_CHAIN_HANDLED  1  /* application handler ran and returned */
+#define CRASH_CHAIN_IGNORED  2  /* application disposition is SIG_IGN */
 
 int crash_sigchain_is_owned(int sig);
 void crash_sigchain_register_existing_handler(int sig, const struct sigaction *handler_old);
 int crash_sigchain_chain_to_app(int sig, siginfo_t *info, void *ucontext);
 void crash_sigchain_init(void);
+void crash_sigchain_reset_locks(void);
 int crash_sigchain_fault_resolved(int sig, siginfo_t *info, void *uctx,
                                   unsigned long pc_before);
+
+/* Values from /proc/self/maps used in crash handling */
+struct crash_map {
+   uintptr_t start, end;
+   unsigned long offset;
+   int writable;
+   char *path;
+   size_t path_size;
+};
+
+int crash_maps_find(uintptr_t addr, struct crash_map *map);
 
 int sigaction_wrapper(int sig, const struct sigaction *act,
                       struct sigaction *oldact);

@@ -31,7 +31,9 @@ struct lock_t {
 };
 
 int lock(struct lock_t *l);
+int lock_signal_safe(struct lock_t *l);
 void unlock(struct lock_t *l);
+void reset_lock(struct lock_t *l);
 
 extern struct lock_t heap_lock;
 #define HEAP_LOCK do { if (lock(&heap_lock) == -1) assert(0); } while (0)
