@@ -18,6 +18,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 
 #include "crash_lib_offset.h"
 #include "crash_fmt.h"
+#include "crash_sigchain.h"
 
 #include <elf.h>
 #include <fcntl.h>
@@ -67,9 +68,10 @@ static char *get_executable_path(void)
    return exe_path_cached = exe_path_cache;
 }
 
-/* Check the program headers of the file at path for the given address */
+/* Check the program headers of the file at path for the given address.
+   If map is given, the segment containing pc must also be the one mapped there. */
 static int pc_in_object_file(const char *path, unsigned long base,
-                             unsigned long pc)
+                             unsigned long pc, const struct crash_map *map)
 {
    ElfW(Ehdr) ehdr;
    ElfW(Phdr) phdr;
@@ -99,7 +101,7 @@ static int pc_in_object_file(const char *path, unsigned long base,
          continue;
       unsigned long start = base + phdr.p_vaddr;
       if (pc >= start && pc < start + phdr.p_memsz) {
-         found = 1;
+         found = !map || start - phdr.p_offset == map->start - map->offset;
          break;
       }
    }
@@ -126,26 +128,36 @@ static int pc_in_exe(unsigned long base, unsigned long pc)
 }
 
 static int walk_link_map_list(struct link_map *cur, unsigned long pc,
+                              const struct crash_map *map,
                               char *buf, size_t buflen)
 {
    for (; cur != NULL; cur = cur->l_next) {
       int is_exe = !(cur->l_name && cur->l_name[0]);
       const char *use_name = is_exe ? get_executable_path() : cur->l_name;
+      const char *read_name = map ? map->path : use_name;
       int hit = is_exe ? pc_in_exe(cur->l_addr, pc)
-                       : pc_in_object_file(use_name, cur->l_addr, pc);
+                       : pc_in_object_file(read_name, cur->l_addr, pc, map);
       if (hit)
          return crash_fmt_lib_offset(buf, buflen, use_name, pc - cur->l_addr);
    }
    return -1;
 }
 
+static char mapped_path[MAX_PATH_LEN + 1];
+
 int crash_lib_offset_get_signal_safe(unsigned long pc, char *buf, size_t buflen)
 {
    const struct r_debug *rd = &_r_debug;
    int extended = (_r_debug.r_version >= 2);
 
+   struct crash_map map = { .path = mapped_path, .path_size = sizeof mapped_path };
+   int rc = crash_maps_find(pc, &map);
+   if (rc == 0 || (rc == 1 && map.path[0] != '/'))
+      return -1;
+   const struct crash_map *pc_map = (rc == 1) ? &map : NULL;
+
    while (rd != NULL) {
-      if (walk_link_map_list(rd->r_map, pc, buf, buflen) == 0)
+      if (walk_link_map_list(rd->r_map, pc, pc_map, buf, buflen) == 0)
          return 0;
       if (!extended)
          break;
