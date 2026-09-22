@@ -90,10 +90,9 @@ CRASH_TESTS=(
 )
 
 declare -A TEST_CORES TEST_CRASHERS TEST_FLAGS TEST_TOPFRAME TEST_SITE TEST_BINARY TEST_CRASHMODE
+declare -A LOG_SITES
 DEFAULT_MODES=()
-SESSION=0
-CROSS_EXE=0
-ORIG_PATH=0
+SESSION_TEST=""
 
 # ---------------- test table parsing ----------------
 
@@ -205,9 +204,9 @@ parse_args() {
          --nodes=*)    NODES="${a#*=}"    ;;
          --scratch=*)  CRASH_TEST_SCRATCH="${a#*=}"  ;;
          --modes=*)    MODES="${a#*=}"    ;;
-         --session)    SESSION=1 ;;
-         --cross-exe)  CROSS_EXE=1 ;;
-         --orig-path)  ORIG_PATH=1 ;;
+         --session|--cross-exe|--orig-path)
+            [ -z "$SESSION_TEST" ] || die "--session, --cross-exe and --orig-path are mutually exclusive"
+            SESSION_TEST="${a#--}" ;;
          --help|-h)    usage; exit 0 ;;
          *) die "unknown argument '$a'" ;;
       esac
@@ -431,19 +430,19 @@ original_path() {
 
 # Check that the log names original paths, not Spindle's relocated copies
 check_original_paths() {
-   local expected_exe="$1" object rc=0
-   if [ "$ROW_EXE" != "$expected_exe" ]; then
-      echo "   exe in log was '$ROW_EXE' but expected '$expected_exe'" >&2
+   local expected_exe="$1" exe="$2" site="$3" object rc=0
+   if [ "$exe" != "$expected_exe" ]; then
+      echo "   exe in log was '$exe' but expected '$expected_exe'" >&2
       rc=1
    fi
-   if [[ "$ROW_EXE" == *-spindlens-* || "$ROW_SITE" == *-spindlens-* ]]; then
-      echo "   exec in log incorrectly names a relocated file (exe '$ROW_EXE', site '$ROW_SITE')" >&2
+   if [[ "$exe" == *-spindlens-* || "$site" == *-spindlens-* ]]; then
+      echo "   exec in log incorrectly names a relocated file (exe '$exe', site '$site')" >&2
       rc=1
    fi
-   if [[ "$ROW_SITE" != abort:* && "$ROW_SITE" == *+0x* ]]; then
-      object="${ROW_SITE%+0x*}"
+   if [[ "$site" != abort:* && "$site" == *+0x* ]]; then
+      object="${site%+0x*}"
       if [ "${object##*/}" = "${expected_exe##*/}" ] && [ "$object" != "$expected_exe" ]; then
-         echo "   site '$ROW_SITE' has incorrect exe name; expected '$expected_exe'" >&2
+         echo "   site '$site' has incorrect exe name; expected '$expected_exe'" >&2
          rc=1
       fi
    fi
@@ -452,7 +451,8 @@ check_original_paths() {
 
 # ---------------- crash log verification ----------------
 
-# Verify the crash log file contains the expected crash sites.
+# Verify the crash log's rows against the mode's
+# expectations and the coredumps on disk.
 verify_crash_log() {
    local mode="$1"
    local dir="$2"
@@ -478,7 +478,7 @@ verify_crash_log() {
    fi
 
    local rc=0 total=0 line key
-   local -A seen=() site_exemplar=() exemplar_rows=()
+   local -A seen=() site_exemplar=() site_corepath=() site_exemplar_pid=()
    while IFS= read -r line; do
       parse_log_row "$line"
       key="$ROW_EXE|$ROW_SITE"
@@ -507,29 +507,49 @@ verify_crash_log() {
          rc=1
       fi
       seen[$ident]=1
+
       if [ -z "${site_exemplar[$key]:-}" ]; then
          site_exemplar[$key]="$ROW_EXEMPLAR"
-         check_original_paths "$expected_exe" || rc=1
+         site_corepath[$key]="$ROW_COREPATH"
+         check_original_paths "$expected_exe" "$ROW_EXE" "$ROW_SITE" || rc=1
          if [ -n "$expected_site" ] && ! [[ "$ROW_SITE" =~ $expected_site ]]; then
             echo "   site '$ROW_SITE' does not match '$expected_site'" >&2
             rc=1
          fi
-      elif [ "${site_exemplar[$key]}" != "$ROW_EXEMPLAR" ]; then
-         echo "   site '$key' exemplar ${site_exemplar[$key]} does not match expected $ROW_EXEMPLAR" >&2
-         rc=1
+         if [ -z "$ROW_COREPATH" ]; then
+            echo "   site '$key': empty corepath" >&2
+            rc=1
+         fi
+      else
+         if [ "${site_exemplar[$key]}" != "$ROW_EXEMPLAR" ]; then
+            echo "   site '$key' exemplar ${site_exemplar[$key]} does not match expected $ROW_EXEMPLAR" >&2
+            rc=1
+         fi
+         if [ "${site_corepath[$key]}" != "$ROW_COREPATH" ]; then
+            echo "   site '$key' has differing corepaths '${site_corepath[$key]}' and '$ROW_COREPATH'" >&2
+            rc=1
+         fi
       fi
-      # The exemplar's row
-      # in forkchild mode, also consider pid
+      # The exemplar's own row
       if [ "$ROW_RANK" = "$ROW_EXEMPLAR" ] &&
-         { [ "$forkchild" = "0" ] ||
-           [[ "${ROW_COREPATH##*/}" =~ (^|[^0-9])$ROW_PID([^0-9]|$) ]]; }; then
-         exemplar_rows[$key]=$(( ${exemplar_rows[$key]:-0} + 1 ))
+         [[ "${ROW_COREPATH##*/}" =~ (^|[^0-9])$ROW_PID([^0-9]|$) ]]; then
+         if [ -n "${site_exemplar_pid[$key]:-}" ]; then
+            echo "   site '$key': exemplar rank $ROW_EXEMPLAR pids ${site_exemplar_pid[$key]} and $ROW_PID both match corepath '$ROW_COREPATH'" >&2
+            rc=1
+         fi
+         site_exemplar_pid[$key]="$ROW_PID"
       fi
    done < <(log_rows "$log")
 
+   # Each site's exemplar row must exist and its core must have been written
+   local cores
+   cores=$(core_files "$dir")
    for key in "${!site_exemplar[@]}"; do
-      if [ "${exemplar_rows[$key]:-0}" != "1" ]; then
-         echo "   exemplar ${site_exemplar[$key]} of site '$key' appears in ${exemplar_rows[$key]:-0} rows, expected 1" >&2
+      if [ -z "${site_exemplar_pid[$key]:-}" ]; then
+         echo "   site '$key': no row of exemplar rank ${site_exemplar[$key]} has its pid in corepath '${site_corepath[$key]}'" >&2
+         rc=1
+      elif ! grep -qxF -- "${site_corepath[$key]}" <<<"$cores"; then
+         echo "   site '$key': logged corepath '${site_corepath[$key]}' (pid ${site_exemplar_pid[$key]}) was not written" >&2
          rc=1
       fi
    done
@@ -543,62 +563,6 @@ verify_crash_log() {
       rc=1
    fi
    return $rc
-}
-
-# Verify that each coredump recorded in the log actually exists on disk.
-# corepath is the site exemplar's predicted core file, repeated on every
-# row of the site.
-verify_exemplar_cores() {
-   local mode="$1"
-   local dir="$2"
-   local log="$dir/crash.log"
-
-   local core cores
-   cores=$(core_files "$dir")
-
-   local line key predicted
-   local -A site_corepath=() site_exemplar_pid=()
-   while IFS= read -r line; do
-      parse_log_row "$line"
-      key="$ROW_EXE|$ROW_SITE"
-      if [ -z "$ROW_COREPATH" ]; then
-         echo "   rank $ROW_RANK pid $ROW_PID: empty corepath for site '$key'" >&2
-         return 1
-      fi
-      if [ -n "${site_corepath[$key]:-}" ] && [ "${site_corepath[$key]}" != "$ROW_COREPATH" ]; then
-         echo "   site '$key' has differing corepaths '${site_corepath[$key]}' and '$ROW_COREPATH'" >&2
-         return 1
-      fi
-      site_corepath[$key]="$ROW_COREPATH"
-      [ "$ROW_RANK" = "$ROW_EXEMPLAR" ] || continue
-      if [[ "${ROW_COREPATH##*/}" =~ (^|[^0-9])$ROW_PID([^0-9]|$) ]]; then
-         if [ -n "${site_exemplar_pid[$key]:-}" ]; then
-            echo "   site '$key': exemplar rank $ROW_EXEMPLAR pids ${site_exemplar_pid[$key]} and $ROW_PID both match corepath '$ROW_COREPATH'" >&2
-            return 1
-         fi
-         site_exemplar_pid[$key]="$ROW_PID"
-      fi
-   done < <(log_rows "$log")
-
-   for key in "${!site_corepath[@]}"; do
-      predicted="${site_corepath[$key]}"
-      if [ -z "${site_exemplar_pid[$key]:-}" ]; then
-         echo "   site '$key': no exemplar-rank row's pid appears in corepath '$predicted'" >&2
-         return 1
-      fi
-      local found=0
-      for core in $cores; do
-         if [ "$core" = "$predicted" ]; then
-            found=1
-            break
-         fi
-      done
-      if [ "$found" != "1" ]; then
-         echo "   site '$key': logged corepath '$predicted' (pid ${site_exemplar_pid[$key]}) was not written" >&2
-         return 1
-      fi
-   done
-   return 0
 }
 
 # Verify that logged crash site matches what is recorded in the coredump.
@@ -627,42 +591,54 @@ verify_log_matches_core() {
 
 # ---------------- session tests ----------------
 
-# Common setup for the session-based tests.  Sets three globals consumed by
-# session_test_launch and the run_*_test functions:
-#   SESSION_DIR  per-test scratch directory
-#   SESSION_LOG  crash log path inside SESSION_DIR
-#   SESSION_RUN  launcher command that runs one program inside the session
+# Common setup for the session-based tests.
+#   SESSION_DIR      per-test scratch directory
+#   SESSION_LOG      crash log path inside SESSION_DIR
+#   SESSION_RUN      launcher command to run a program on every node
+#                    inside the session
+#   SESSION_RUN_ONE  launcher command to run on one node within session
 session_test_setup() {
-   local name="$1"
-   case "$LAUNCHER" in
-      slurm-plugin|flux) ;;
-      *) die "--$name requires --launcher=slurm-plugin or --launcher=flux" ;;
-   esac
-
-   mkdir -p "$CRASH_TEST_SCRATCH" || die "can't create scratch dir '$CRASH_TEST_SCRATCH'"
-   SESSION_DIR=$(mktemp -d "$CRASH_TEST_SCRATCH/$name.XXXXXX") || die "can't create test dir"
-   SESSION_LOG="$SESSION_DIR/crash.log"
-
+   local name="$1" flux_run
    case "$LAUNCHER" in
       slurm-plugin)
          SESSION_RUN="srun --spindle"
          SESSION_RUN_ONE="srun --spindle -N1 -n1"
          ;;
       flux)
-         SESSION_RUN="flux run -o userrc=$SPINDLE_RC -o spindle --env=LD_LIBRARY_PATH -N$NODES -n$NODES --"
-         SESSION_RUN_ONE="flux run -o userrc=$SPINDLE_RC -o spindle --env=LD_LIBRARY_PATH -N1 -n1 --"
+         flux_run="flux run -o userrc=$SPINDLE_RC -o spindle --env=LD_LIBRARY_PATH"
+         SESSION_RUN="$flux_run -N$NODES -n$NODES --"
+         SESSION_RUN_ONE="$flux_run -N1 -n1 --"
          ;;
+      *) die "--$name requires --launcher=slurm-plugin or --launcher=flux" ;;
    esac
+
+   mkdir -p "$CRASH_TEST_SCRATCH" || die "can't create scratch dir '$CRASH_TEST_SCRATCH'"
+   SESSION_DIR=$(mktemp -d "$CRASH_TEST_SCRATCH/$name.XXXXXX") || die "can't create test dir"
+   SESSION_LOG="$SESSION_DIR/crash.log"
+}
+
+collect_log_sites() {
+   local log="$1" line key
+   LOG_SITES=()
+   LOG_TOTAL=0
+   log_check_header "$log" || return 0
+   while IFS= read -r line; do
+      parse_log_row "$line"
+      key="$ROW_EXE|$ROW_SITE"
+      LOG_SITES[$key]=$(( ${LOG_SITES[$key]:-0} + 1 ))
+      LOG_TOTAL=$((LOG_TOTAL + 1))
+   done < <(log_rows "$log")
 }
 
 session_test_launch() {
    local session_opts="--crash-dedup --crash-log=$SESSION_LOG${1:+ $1}"
-   chmod +x "$SESSION_DIR/inner.sh"
    ulimit -c unlimited
+   # Make libcrashfuncs.so visible to dlopen() from the session's scratch dir.
+   export LD_LIBRARY_PATH="$TESTDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
    case "$LAUNCHER" in
       slurm-plugin)
          ( cd "$SESSION_DIR" && salloc -N"$NODES" -n"$NODES" \
-              --spindle-session="$session_opts" "$SESSION_DIR/inner.sh" ) \
+              --spindle-session="$session_opts" bash "$SESSION_DIR/inner.sh" ) \
             >"$SESSION_DIR/stdout.log" 2>"$SESSION_DIR/stderr.log"
          ;;
       flux)
@@ -670,13 +646,9 @@ session_test_launch() {
          local sid
          sid=$("$SPINDLE" --start-session $session_opts 2>"$SESSION_DIR/session.log") || \
             die "spindle --start-session failed (see $SESSION_DIR/session.log)"
-         ( cd "$SESSION_DIR" && "$SESSION_DIR/inner.sh" ) \
+         ( cd "$SESSION_DIR" && bash "$SESSION_DIR/inner.sh" ) \
             >"$SESSION_DIR/stdout.log" 2>"$SESSION_DIR/stderr.log"
-         if [ -n "$sid" ]; then
-            "$SPINDLE" --end-session="$sid" >>"$SESSION_DIR/session.log" 2>&1
-         else
-            "$SPINDLE" --end-session >>"$SESSION_DIR/session.log" 2>&1
-         fi
+         "$SPINDLE" "--end-session${sid:+=$sid}" >>"$SESSION_DIR/session.log" 2>&1
          ;;
    esac
    # Wait briefly for the server to shut down and write the log
@@ -689,10 +661,7 @@ run_session_test() {
    session_test_setup session
    local dir="$SESSION_DIR" log="$SESSION_LOG"
 
-   # inner.sh is the script that gets run inside the session
    cat >"$dir/inner.sh" <<EOF
-#!/bin/bash
-export LD_LIBRARY_PATH="$TESTDIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 $SESSION_RUN "$TESTDIR/crash_test" --crash-mode all-same
 sleep 3
 if [ -e "$log" ]; then echo present; else echo absent; fi > "$dir/log_after_run1"
@@ -702,25 +671,16 @@ if [ -e "$log" ]; then echo present; else echo absent; fi > "$dir/log_after_run2
 EOF
    session_test_launch
 
-   local after1 after2 sites=0 total=0 line
-   local -A keys=()
+   local after1 after2 ok=1
    after1=$(cat "$dir/log_after_run1" 2>/dev/null || echo missing)
    after2=$(cat "$dir/log_after_run2" 2>/dev/null || echo missing)
-   if log_check_header "$log" 2>/dev/null; then
-      while IFS= read -r line; do
-         parse_log_row "$line"
-         keys["$ROW_EXE|$ROW_SITE"]=1
-         total=$((total + 1))
-      done < <(log_rows "$log")
-      sites=${#keys[@]}
-   fi
+   collect_log_sites "$log"
 
-   local ok=1
    [ "$after1" = "absent" ] || { echo "FAIL session: log $after1 after run 1"; ok=0; }
    [ "$after2" = "absent" ] || { echo "FAIL session: log $after2 after run 2"; ok=0; }
-   [ "$sites" = "2" ] || { echo "FAIL session: $sites sites after session end"; ok=0; }
-   [ "$total" = "$((2 * NODES))" ] || \
-      { echo "FAIL session: $total total ranks in final log (expected $((2 * NODES)))"; ok=0; }
+   [ "${#LOG_SITES[@]}" = "2" ] || { echo "FAIL session: ${#LOG_SITES[@]} sites after session end"; ok=0; }
+   [ "$LOG_TOTAL" = "$((2 * NODES))" ] || \
+      { echo "FAIL session: $LOG_TOTAL total ranks in final log (expected $((2 * NODES)))"; ok=0; }
 
    [ "$ok" = "1" ] || exit 1
    echo "PASS session"
@@ -733,10 +693,7 @@ run_cross_exe_test() {
    session_test_setup cross-exe
    local dir="$SESSION_DIR"
 
-   # inner.sh is the script that gets run inside the session
    cat >"$dir/inner.sh" <<EOF
-#!/bin/bash
-export LD_LIBRARY_PATH="$TESTDIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 $SESSION_RUN "$TESTDIR/crash_test" --crash-mode in-library
 sleep 3
 $SESSION_RUN "$TESTDIR/crash_test_pie" --crash-mode in-library
@@ -744,70 +701,38 @@ sleep 3
 EOF
    session_test_launch
 
-   verify_cross_exe "$dir" || exit 1
-   echo "PASS cross-exe"
-}
-
-verify_cross_exe() {
-   local dir="$1"
-   local log="$dir/crash.log"
-
-   local ncores sites ok=1 line key i
-   local -a exes=() tails=() counts=()
-   local -A index=()
+   local plain pie ncores key exe site prev_site="" ok=1
+   plain=$(original_path crash_test)
+   pie=$(original_path crash_test_pie)
    ncores=$(count_cores "$dir")
-   # Collect the crash sites
-   if log_check_header "$log" 2>/dev/null; then
-      while IFS= read -r line; do
-         parse_log_row "$line"
-         key="$ROW_EXE|$ROW_SITE"
-         i="${index[$key]:-}"
-         if [ -z "$i" ]; then
-            i=${#exes[@]}
-            index[$key]=$i
-            exes+=("$ROW_EXE")
-            tails+=("$ROW_SITE")
-            counts+=(0)
-         fi
-         counts[i]=$((counts[i] + 1))
-      done < <(log_rows "$log")
-   fi
-   sites=${#exes[@]}
+   collect_log_sites "$dir/crash.log"
 
    [ "$ncores" = "2" ] || { echo "FAIL cross-exe: $ncores coredumps (expected 2)"; ok=0; }
-   [ "$sites" = "2" ] || { echo "FAIL cross-exe: $sites crashsites (expected 2)"; ok=0; }
+   [ "${#LOG_SITES[@]}" = "2" ] || { echo "FAIL cross-exe: ${#LOG_SITES[@]} crashsites (expected 2)"; ok=0; }
 
-   if [ "$sites" = "2" ]; then
-      # Same library site under both programs
-      local lib_regex='libcrashfuncs\.so\+0x'
-      if ! [[ "${tails[0]}" =~ $lib_regex ]] || ! [[ "${tails[1]}" =~ $lib_regex ]]; then
-         echo "FAIL cross-exe: crash sites are not both in libcrashfuncs.so ('${tails[0]}', '${tails[1]}')"
-         ok=0
-      elif [ "${tails[0]}" != "${tails[1]}" ]; then
-         echo "FAIL cross-exe: crash sites unexpectedly differ ('${tails[0]}' vs '${tails[1]}')"
-         ok=0
-      fi
-      # distinguished by the executable part of the crash key
-      if [ "${exes[0]}" = "${exes[1]}" ]; then
-         echo "FAIL cross-exe: both crash sites name the same executable '${exes[0]}'"
+   # Both programs crashed at the same libcrashfuncs.so site on every node,
+   # so the two keys differ only in their executable
+   for key in "${!LOG_SITES[@]}"; do
+      exe="${key%%|*}"
+      site="${key#*|}"
+      if [ "$exe" != "$plain" ] && [ "$exe" != "$pie" ]; then
+         echo "FAIL cross-exe: unexpected executable '$exe'"
          ok=0
       fi
-      local pie plain
-      pie=$(original_path crash_test_pie)
-      plain=$(original_path crash_test)
-      if ! { [ "${exes[0]}" = "$plain" ] && [ "${exes[1]}" = "$pie" ]; } && \
-         ! { [ "${exes[1]}" = "$plain" ] && [ "${exes[0]}" = "$pie" ]; }; then
-         echo "FAIL cross-exe: wrong crash sites found ('${exes[0]}', '${exes[1]}')"
+      if ! [[ "$site" =~ libcrashfuncs\.so\+0x ]]; then
+         echo "FAIL cross-exe: crash site '$site' is not in libcrashfuncs.so"
+         ok=0
+      elif [ -n "$prev_site" ] && [ "$site" != "$prev_site" ]; then
+         echo "FAIL cross-exe: crash sites unexpectedly differ ('$prev_site' vs '$site')"
          ok=0
       fi
-      # Verify each program crashed on every node, and the two runs did not merge.
-      local c
-      for c in "${counts[@]}"; do
-         [ "$c" = "$NODES" ] || { echo "FAIL cross-exe: crashsite has $c rows (expected $NODES)"; ok=0; }
-      done
-   fi
+      prev_site="$site"
+      [ "${LOG_SITES[$key]}" = "$NODES" ] || \
+         { echo "FAIL cross-exe: site '$key' has ${LOG_SITES[$key]} rows (expected $NODES)"; ok=0; }
+   done
 
-   [ "$ok" = "1" ]
+   [ "$ok" = "1" ] || exit 1
+   echo "PASS cross-exe"
 }
 
 # Original path test
@@ -820,10 +745,7 @@ run_orig_path_test() {
    session_test_setup orig-path
    local dir="$SESSION_DIR" log="$SESSION_LOG"
 
-   # inner.sh is the script that gets run inside the session
    cat >"$dir/inner.sh" <<EOF
-#!/bin/bash
-export LD_LIBRARY_PATH="$TESTDIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 $SESSION_RUN_ONE "$TESTDIR/crash_test_pie" --crash-mode safepoint
 sleep 3
 $SESSION_RUN "$TESTDIR/crash_test" --crash-mode all-same
@@ -831,22 +753,17 @@ sleep 3
 EOF
    session_test_launch --pull
 
-   local expected_exe ncores total=0 line ok=1
-   local -A keys=()
+   local expected_exe ncores key ok=1
    expected_exe=$(original_path crash_test)
    ncores=$(count_cores "$dir")
-   if log_check_header "$log" 2>/dev/null; then
-      while IFS= read -r line; do
-         parse_log_row "$line"
-         keys["$ROW_EXE|$ROW_SITE"]=1
-         total=$((total + 1))
-         check_original_paths "$expected_exe" || ok=0
-      done < <(log_rows "$log")
-   fi
+   collect_log_sites "$log"
+   for key in "${!LOG_SITES[@]}"; do
+      check_original_paths "$expected_exe" "${key%%|*}" "${key#*|}" || ok=0
+   done
 
    [ "$ncores" = "1" ] || { echo "FAIL orig-path: $ncores coredumps (expected 1)"; ok=0; }
-   [ "${#keys[@]}" = "1" ] || { echo "FAIL orig-path: ${#keys[@]} crashsites (expected 1)"; ok=0; }
-   [ "$total" = "$NODES" ] || { echo "FAIL orig-path: $total rows (expected $NODES)"; ok=0; }
+   [ "${#LOG_SITES[@]}" = "1" ] || { echo "FAIL orig-path: ${#LOG_SITES[@]} crashsites (expected 1)"; ok=0; }
+   [ "$LOG_TOTAL" = "$NODES" ] || { echo "FAIL orig-path: $LOG_TOTAL rows (expected $NODES)"; ok=0; }
 
    [ "$ok" = "1" ] || exit 1
    echo "PASS orig-path"
@@ -894,15 +811,10 @@ verify_crashed_mode() {
       return 1
    fi
 
-   # Verify sites, ranks, counts, and exemplars from the crash log
+   # Verify sites, ranks, counts, and exemplars from the crash log, and
+   # that each exemplar's logged core was written
    if ! verify_crash_log "$mode" "$dir" "$actual"; then
       echo "FAIL $mode: crash log verification failed"
-      return 1
-   fi
-
-   # Verify each exemplar rank owns a coredump on disk
-   if ! verify_exemplar_cores "$mode" "$dir"; then
-      echo "FAIL $mode: exemplar recorded in log does not correspond to a coredump file"
       return 1
    fi
 
@@ -950,18 +862,8 @@ main() {
    fi
    check_prereqs
 
-   if [ "$SESSION" = "1" ]; then
-      run_session_test
-      return
-   fi
-
-   if [ "$CROSS_EXE" = "1" ]; then
-      run_cross_exe_test
-      return
-   fi
-
-   if [ "$ORIG_PATH" = "1" ]; then
-      run_orig_path_test
+   if [ -n "$SESSION_TEST" ]; then
+      "run_${SESSION_TEST//-/_}_test"
       return
    fi
 
