@@ -177,6 +177,10 @@ jobs:
         run: |
           docker exec node-1 bash -c 'cd Spindle-build/testsuite && flux alloc --nodes=${workers} ./run_crash_tests.sh --launcher=flux --nodes=${workers} --scratch=/shared/spindle_crash_test --cross-exe'
 
+      - name: Run spindle-flux-ubuntu original-path crash test
+        run: |
+          docker exec node-1 bash -c 'cd Spindle-build/testsuite && flux alloc --nodes=${workers} ./run_crash_tests.sh --launcher=flux --nodes=${workers} --scratch=/shared/spindle_crash_test --orig-path'
+
       - name: Bring spindle-flux-ubuntu down
         id: flux-ubuntu-down
         if: ${{ always() }}
@@ -381,6 +385,10 @@ jobs:
       - name: Run spindle-slurm-plugin-ubuntu cross-executable crash test
         run: |
           docker exec slurm-plugin-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm-plugin --nodes=${workers} --scratch=/shared/spindle_crash_test --cross-exe'
+
+      - name: Run spindle-slurm-plugin-ubuntu original-path crash test
+        run: |
+          docker exec slurm-plugin-head bash -c 'cd Spindle-build/testsuite && ./run_crash_tests.sh --launcher=slurm-plugin --nodes=${workers} --scratch=/shared/spindle_crash_test --orig-path'
 
       - name: Bring spindle-slurm-plugin-ubuntu down
         id: slurm-ubuntu-down

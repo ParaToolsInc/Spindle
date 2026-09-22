@@ -2,10 +2,11 @@
 
 # Usage:
 #   ./run_crash_tests.sh [--launcher=serial|flux|slurm|slurm-plugin] --nodes=N
-#                        [--scratch=DIR] [--modes=LIST] [--session | --cross-exe]
+#                        [--scratch=DIR] [--modes=LIST]
+#                        [--session | --cross-exe | --orig-path]
 #
 # By default, runs all normal crash tests; use --modes to specify a subset to run.
-# --session and --cross-exe instead run the session-based tests;
+# --session, --cross-exe and --orig-path instead run the session-based tests;
 # these are separate because they require fresh sessions
 #
 # If running the tests from a non-shared filesystem, set --scratch to a shared
@@ -92,6 +93,7 @@ declare -A TEST_CORES TEST_CRASHERS TEST_FLAGS TEST_TOPFRAME TEST_SITE TEST_BINA
 DEFAULT_MODES=()
 SESSION=0
 CROSS_EXE=0
+ORIG_PATH=0
 
 # ---------------- test table parsing ----------------
 
@@ -166,7 +168,8 @@ usage() {
    cat <<EOF
 Usage:
   $prog [--launcher=serial|flux|slurm|slurm-plugin] [--nodes=N]
-        [--scratch=DIR] [--modes=mode1,mode2,...] [--session | --cross-exe]
+        [--scratch=DIR] [--modes=mode1,mode2,...]
+        [--session | --cross-exe | --orig-path]
 
 Runs tests of the crash handler.
 
@@ -182,6 +185,8 @@ Options:
                        normal tests.
   --cross-exe          Run the cross-executable dedup test instead of the
                        normal tests.
+  --orig-path          Run the original path dedup test instead of the
+                       normal tests (needs at least 3 nodes).
   --help, -h           Show this help and exit.
 
 Available tests:
@@ -202,6 +207,7 @@ parse_args() {
          --modes=*)    MODES="${a#*=}"    ;;
          --session)    SESSION=1 ;;
          --cross-exe)  CROSS_EXE=1 ;;
+         --orig-path)  ORIG_PATH=1 ;;
          --help|-h)    usage; exit 0 ;;
          *) die "unknown argument '$a'" ;;
       esac
@@ -338,7 +344,10 @@ verify_top_frames() {
    return 0
 }
 
-# Read the crash site key (library+offset) out of the coredump
+unrelocated_path() {
+   sed -E 's#^.*/spindle\.[0-9a-f]+##; s#/[0-9]+-spindlens-dso-#/#'
+}
+
 read_crash_site() {
    local core="$1"
    local binary="${2:-$TESTDIR/crash_test}"
@@ -350,7 +359,7 @@ read_crash_site() {
    base=$(printf '%s' "$map" | awk '{print $1}')
    cachepath=$(printf '%s' "$map" | awk '{print $NF}')
    # Figure out the path to the Spindle audit library
-   real=$(printf '%s' "$cachepath" | sed -E 's#^.*/spindle\.[0-9a-f]+##; s#/[0-9]+-spindlens-dso-#/#')
+   real=$(printf '%s' "$cachepath" | unrelocated_path)
    # Open the coredump with the Spindle audit library symbols loaded
    # so we can check crash_site_buf
    gdb -batch -nx -ex 'set debuginfod enabled off' \
@@ -415,6 +424,32 @@ parse_log_row() {
    fi
 }
 
+# The path the crash log should name for a test binary
+original_path() {
+   realpath "$TESTDIR/$1" 2>/dev/null || echo "$TESTDIR/$1"
+}
+
+# Check that the log names original paths, not Spindle's relocated copies
+check_original_paths() {
+   local expected_exe="$1" object rc=0
+   if [ "$ROW_EXE" != "$expected_exe" ]; then
+      echo "   exe in log was '$ROW_EXE' but expected '$expected_exe'" >&2
+      rc=1
+   fi
+   if [[ "$ROW_EXE" == *-spindlens-* || "$ROW_SITE" == *-spindlens-* ]]; then
+      echo "   exec in log incorrectly names a relocated file (exe '$ROW_EXE', site '$ROW_SITE')" >&2
+      rc=1
+   fi
+   if [[ "$ROW_SITE" != abort:* && "$ROW_SITE" == *+0x* ]]; then
+      object="${ROW_SITE%+0x*}"
+      if [ "${object##*/}" = "${expected_exe##*/}" ] && [ "$object" != "$expected_exe" ]; then
+         echo "   site '$ROW_SITE' has incorrect exe name; expected '$expected_exe'" >&2
+         rc=1
+      fi
+   fi
+   return $rc
+}
+
 # ---------------- crash log verification ----------------
 
 # Verify the crash log file contains the expected crash sites.
@@ -430,7 +465,8 @@ verify_crash_log() {
    [ "$expected_site" = "-" ] && expected_site=""
 
    local binary_name="${TEST_BINARY[$mode]:-crash_test}"
-   local expected_exe="${binary_name}\$"
+   local expected_exe
+   expected_exe=$(original_path "$binary_name")
 
    log_check_header "$log" || return 1
 
@@ -473,10 +509,7 @@ verify_crash_log() {
       seen[$ident]=1
       if [ -z "${site_exemplar[$key]:-}" ]; then
          site_exemplar[$key]="$ROW_EXEMPLAR"
-         if ! [[ "$ROW_EXE" =~ $expected_exe ]]; then
-            echo "   exe '$ROW_EXE' does not match executable '$binary_name'" >&2
-            rc=1
-         fi
+         check_original_paths "$expected_exe" || rc=1
          if [ -n "$expected_site" ] && ! [[ "$ROW_SITE" =~ $expected_site ]]; then
             echo "   site '$ROW_SITE' does not match '$expected_site'" >&2
             rc=1
@@ -584,6 +617,7 @@ verify_log_matches_core() {
       echo "   could not read crash site from $core" >&2
       return 1
    fi
+   core_site=$(printf '%s' "$core_site" | unrelocated_path)
    if [ "$core_site" != "$ROW_SITE" ]; then
       echo "   core site '$core_site' != logged site '$ROW_SITE'" >&2
       return 1
@@ -612,15 +646,17 @@ session_test_setup() {
    case "$LAUNCHER" in
       slurm-plugin)
          SESSION_RUN="srun --spindle"
+         SESSION_RUN_ONE="srun --spindle -N1 -n1"
          ;;
       flux)
          SESSION_RUN="flux run -o userrc=$SPINDLE_RC -o spindle --env=LD_LIBRARY_PATH -N$NODES -n$NODES --"
+         SESSION_RUN_ONE="flux run -o userrc=$SPINDLE_RC -o spindle --env=LD_LIBRARY_PATH -N1 -n1 --"
          ;;
    esac
 }
 
 session_test_launch() {
-   local session_opts="--crash-dedup --crash-log=$SESSION_LOG"
+   local session_opts="--crash-dedup --crash-log=$SESSION_LOG${1:+ $1}"
    chmod +x "$SESSION_DIR/inner.sh"
    ulimit -c unlimited
    case "$LAUNCHER" in
@@ -756,9 +792,11 @@ verify_cross_exe() {
          echo "FAIL cross-exe: both crash sites name the same executable '${exes[0]}'"
          ok=0
       fi
-      local pie_regex='crash_test_pie$' plain_regex='crash_test$'
-      if ! { [[ "${exes[0]}" =~ $plain_regex ]] && [[ "${exes[1]}" =~ $pie_regex ]]; } && \
-         ! { [[ "${exes[1]}" =~ $plain_regex ]] && [[ "${exes[0]}" =~ $pie_regex ]]; }; then
+      local pie plain
+      pie=$(original_path crash_test_pie)
+      plain=$(original_path crash_test)
+      if ! { [ "${exes[0]}" = "$plain" ] && [ "${exes[1]}" = "$pie" ]; } && \
+         ! { [ "${exes[1]}" = "$plain" ] && [ "${exes[0]}" = "$pie" ]; }; then
          echo "FAIL cross-exe: wrong crash sites found ('${exes[0]}', '${exes[1]}')"
          ok=0
       fi
@@ -770,6 +808,48 @@ verify_cross_exe() {
    fi
 
    [ "$ok" = "1" ]
+}
+
+# Original path test
+# Verifies that if a given executable is relocated to different
+# names on different nodes, these are still treated as the same site
+# for deduplication purposes and are recorded in the log under
+# the original path.
+run_orig_path_test() {
+   [ "$NODES" -ge 3 ] || die "--orig-path requires at least 3 nodes"
+   session_test_setup orig-path
+   local dir="$SESSION_DIR" log="$SESSION_LOG"
+
+   # inner.sh is the script that gets run inside the session
+   cat >"$dir/inner.sh" <<EOF
+#!/bin/bash
+export LD_LIBRARY_PATH="$TESTDIR\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+$SESSION_RUN_ONE "$TESTDIR/crash_test_pie" --crash-mode safepoint
+sleep 3
+$SESSION_RUN "$TESTDIR/crash_test" --crash-mode all-same
+sleep 3
+EOF
+   session_test_launch --pull
+
+   local expected_exe ncores total=0 line ok=1
+   local -A keys=()
+   expected_exe=$(original_path crash_test)
+   ncores=$(count_cores "$dir")
+   if log_check_header "$log" 2>/dev/null; then
+      while IFS= read -r line; do
+         parse_log_row "$line"
+         keys["$ROW_EXE|$ROW_SITE"]=1
+         total=$((total + 1))
+         check_original_paths "$expected_exe" || ok=0
+      done < <(log_rows "$log")
+   fi
+
+   [ "$ncores" = "1" ] || { echo "FAIL orig-path: $ncores coredumps (expected 1)"; ok=0; }
+   [ "${#keys[@]}" = "1" ] || { echo "FAIL orig-path: ${#keys[@]} crashsites (expected 1)"; ok=0; }
+   [ "$total" = "$NODES" ] || { echo "FAIL orig-path: $total rows (expected $NODES)"; ok=0; }
+
+   [ "$ok" = "1" ] || exit 1
+   echo "PASS orig-path"
 }
 
 # ---------------- test verification helpers ----------------
@@ -877,6 +957,11 @@ main() {
 
    if [ "$CROSS_EXE" = "1" ]; then
       run_cross_exe_test
+      return
+   fi
+
+   if [ "$ORIG_PATH" = "1" ]; then
+      run_orig_path_test
       return
    fi
 

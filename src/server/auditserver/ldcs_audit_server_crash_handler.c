@@ -24,6 +24,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "ldcs_audit_server_process.h"
 #include "ldcs_audit_server_md.h"
 #include "ldcs_audit_server_crash_handler.h"
+#include "global_name.h"
 #include "spindle_launch.h"
 #include "msgbundle.h"
 
@@ -310,6 +311,63 @@ static int crash_report_common(ldcs_process_data_t *procdata,
                                  reporter_rank, reporter_display_rank);
 }
 
+// Looks up the original path for a relocated path, returning
+// the relocated path if we couldn't get the original.
+static char *crash_original_path(char *path)
+{
+   char *orig = lookup_global_name(path);
+   if (!orig)
+      return path;
+   debug_printf2("crash report using orig path %s for relocated path %s\n", orig, path);
+   return orig;
+}
+
+// Returns the "+0x<offset>" part of an <object>+0x<offset> site,
+// or NULL if not in that format.
+static const char *crash_site_offset(const char *site)
+{
+   const char *p, *offset = NULL;
+   if (strncmp(site, "abort:", 6) == 0)
+      return NULL;
+   for (p = strstr(site, "+0x"); p; p = strstr(p + 1, "+0x"))
+      offset = p;
+   return offset;
+}
+
+// Returns a copy of the given crash site site with the 
+// object part of <object>+0x<offset> replaced by its original path
+static char *crash_original_site(const char *site)
+{
+   const char *offset = crash_site_offset(site);
+   if (!offset)
+      return strdup(site);
+
+   char *object = strndup(site, offset - site);
+   char *orig = crash_original_path(object);
+   size_t len = strlen(orig) + strlen(offset) + 1;
+   char *result = malloc(len);
+   snprintf(result, len, "%s%s", orig, offset);
+   free(object);
+   return result;
+}
+
+// Build the dedup key <executable>|<site>
+static char *crash_build_key(char *exe, const char *site, size_t site_len,
+                             size_t *key_len)
+{
+   char *site_str = strndup(site, site_len);
+   char *orig_site = crash_original_site(site_str);
+   char *orig_exe = crash_original_path(exe);
+
+   *key_len = strlen(orig_exe) + 1 + strlen(orig_site) + 1;
+   char *key = malloc(*key_len);
+   snprintf(key, *key_len, "%s|%s", orig_exe, orig_site);
+
+   free(orig_site);
+   free(site_str);
+   return key;
+}
+
 /* PUBLIC API */
 
 // Stash the executable path or predicted core path that a local client
@@ -384,13 +442,8 @@ int handle_client_crash_report(ldcs_process_data_t *procdata,
       err_printf("CRASH_REPORT from local client nc=%d without a preceding CRASH_EXE; dropping\n", nc);
       return -1;
    }
-   size_t exe_len = strlen(client->crash_exe);
-   size_t key_len = exe_len + 1 + site_len;   /* site_len counts the site's NUL */
-   char *key = malloc(key_len);
-   memcpy(key, client->crash_exe, exe_len);
-   key[exe_len] = '|';
-   memcpy(key + exe_len + 1, site, site_len);
-   key[key_len - 1] = '\0';
+   size_t key_len;
+   char *key = crash_build_key(client->crash_exe, site, site_len, &key_len);
 
    crash_waiter_t w;
    w.kind = CRASH_WAITER_LOCAL;
