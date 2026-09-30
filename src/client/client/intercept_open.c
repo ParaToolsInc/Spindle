@@ -43,6 +43,8 @@ int (*orig_open64)(const char *pathname, int flags, ...);
 FILE* (*orig_fopen)(const char *pathname, const char *mode);
 FILE* (*orig_fopen64)(const char *pathname, const char *mode);
 int (*orig_close)(int fd);
+int (*orig_close_range)(unsigned int first, unsigned int last, int flags);
+void (*orig_closefrom)(int lowfd);
 char* (*orig_dlerror)();
 static int handle_proc_pid_maps_open(const char *path, char **newpath);
 
@@ -292,6 +294,42 @@ int rtcache_close(int fd)
       return -1;
    }
    return orig_close(fd);
+}
+
+int rtcache_close_range(unsigned int first, unsigned int last, int flags)
+{
+   int fds[4];
+   int n, i;
+   unsigned int lowfd = first;
+
+   check_for_fork();
+
+   /* Make sure we call the original if we have
+    * invalid arguments so we get EINVAL. */
+   if (first > last)
+      return orig_close_range(first, last, flags);
+
+   /* Convert the close_range into a sequence of close_range calls, 
+    * skipping over any of Spindle's own fds. */
+   n = get_hidden_fds(fds);
+   for (i = 0; i < n; i++) {
+      unsigned int fd = (unsigned int) fds[i];
+      if (fd < lowfd || fd > last)
+         continue;
+      if (fd > lowfd && orig_close_range(lowfd, fd - 1, flags) == -1)
+         return -1;
+      lowfd = fd + 1;
+   }
+   if (lowfd > last)
+      return 0;
+   return orig_close_range(lowfd, last, flags);
+}
+
+void rtcache_closefrom(int lowfd)
+{
+   /* glibc uses MAX(0, lowfd); mimic that behavior */
+   if (rtcache_close_range(lowfd < 0 ? 0 : lowfd, ~0U, 0) == -1)
+      orig_closefrom(lowfd);
 }
 
 char *dlerror_wrapper()

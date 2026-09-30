@@ -109,5 +109,6 @@ void init_spindle_debugging(char *name, int survive_exec);
 void fini_spindle_debugging();
 void reset_spindle_debugging();
 int is_debug_fd(int fd);
+void get_debug_fds(int *log_fd, int *testlog_fd);
 
 #endif
