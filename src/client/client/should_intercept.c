@@ -287,3 +287,30 @@ int fd_filter(int fd)
 
    return ORIG_CALL;
 }
+
+/* Places Spindle's fds into fds. 
+ * fds must be of size at least 4;
+ * returns the number of fds added to fds */
+int get_hidden_fds(int *fds)
+{
+   int candidates[4];
+   int n = 0;
+   int i, j;
+
+   if (opts & OPT_NOHIDE)
+      return 0;
+
+   client_get_raw_fds(ldcsid, &candidates[0], &candidates[1]);
+   get_debug_fds(&candidates[2], &candidates[3]);
+
+   /* Put sorted candidates into fds, dropping -1 values */
+   for (i = 0; i < 4; i++) {
+      if (candidates[i] < 0)
+         continue;
+      for (j = n; j > 0 && fds[j-1] > candidates[i]; j--)
+         fds[j] = fds[j-1];
+      fds[j] = candidates[i];
+      n++;
+   }
+   return n;
+}
