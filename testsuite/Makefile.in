@@ -360,9 +360,9 @@ BUILT_SOURCES = libtest10.so libtest11.so libtest12.so libtest13.so \
 	alias/aliastest.py exec_shell.sh exec_shell.tcsh \
 	exec_shell_expected_output exec_shell exec_shell_env.sh \
 	libbigtls1024.so libbigtls204800.so libbigtls1048576.so \
-	crash_test crash_test_fixedaddr crash_test_pie \
-	libcrashfuncs.so libcrashctor.so libcrashfixed.so \
-	run_crash_tests.sh
+	close_range_test crash_test crash_test_fixedaddr \
+	crash_test_pie libcrashfuncs.so libcrashctor.so \
+	libcrashfixed.so run_crash_tests.sh
 @BGQ_BLD_FALSE@DYNAMIC_FLAG = 
 @BGQ_BLD_TRUE@DYNAMIC_FLAG = -dynamic
 @BGQ_BLD_FALSE@IS_BLUEGENE = false
@@ -407,7 +407,8 @@ CLEANFILES = libtest10.c libtest11.c libtest12.c libtest13.c \
 	exec_shell.tcsh exec_shell_env.sh exec_shell_expected_output \
 	exec_shell crash_test crash_test_fixedaddr crash_test_pie \
 	libcrashfuncs.so libcrashctor.so libcrashfixed.so \
-	run_crash_tests.sh libbigtls204800.so libbigtls1048576.so
+	run_crash_tests.sh libbigtls204800.so libbigtls1048576.so \
+	close_range_test
 all: $(BUILT_SOURCES)
 	$(MAKE) $(AM_MAKEFLAGS) all-am
 
@@ -1160,6 +1161,9 @@ exec_shell_expected_output: $(srcdir)/exec_shell_expected_output_template
 	$(AM_V_GEN)cp $< $@
 
 exec_shell: $(srcdir)/exec_shell.c
+	$(AM_V_CCLD)$(CC) $(CFLAGS) -o $@ $<
+
+close_range_test: $(srcdir)/close_range_test.c
 	$(AM_V_CCLD)$(CC) $(CFLAGS) -o $@ $<
 
 # Tell versions [3.59,3.63) of GNU make to not export all variables.
