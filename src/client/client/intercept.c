@@ -30,6 +30,8 @@ struct spindle_binding_t spindle_bindings[] = {
    { "fopen", (void **) &orig_fopen, "rtcache_fopen", (void *) rtcache_fopen },
    { "fopen64", (void **) &orig_fopen64, "rtcache_fopen64", (void *) rtcache_fopen64 },
    { "close", (void **) &orig_close, "rtcache_close", (void *) rtcache_close },
+   { "close_range", (void **) &orig_close_range, "rtcache_close_range", (void *) rtcache_close_range },
+   { "closefrom", (void **) &orig_closefrom, "rtcache_closefrom", (void *) rtcache_closefrom },
    { "stat", (void **) &orig_stat, "rtcache_stat", (void *) rtcache_stat },
    { "lstat", (void **) &orig_lstat, "rtcache_lstat", (void *) rtcache_lstat },
    { "__xstat", (void **) &orig_xstat, "rtcache_xstat", (void *) rtcache_xstat },

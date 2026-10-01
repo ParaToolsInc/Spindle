@@ -193,6 +193,9 @@ CHECK_RETCODE
 ./run_driver --serial ./exec_shell
 CHECK_RETCODE
 
+./run_driver --serial ./close_range_test
+CHECK_RETCODE
+
 if [[ $GLOBAL_RESULT != 0 ]]; then
     echo SOME TESTS FAILED
     exit -1

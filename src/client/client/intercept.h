@@ -48,6 +48,8 @@ extern int (*orig_open64)(const char *pathname, int flags, ...);
 extern FILE* (*orig_fopen)(const char *pathname, const char *mode);
 extern FILE* (*orig_fopen64)(const char *pathname, const char *mode);
 extern int (*orig_close)(int fd);
+extern int (*orig_close_range)(unsigned int first, unsigned int last, int flags);
+extern void (*orig_closefrom)(int lowfd);
 extern char* (*orig_getenv)(const char *name);
 extern int (*orig_setenv)(const char *name, const char *value, int overwrite);
 extern int (*orig_unsetenv)(const char *name);
@@ -83,6 +85,8 @@ int rtcache_open64(const char *path, int oflag, ...);
 FILE *rtcache_fopen(const char *path, const char *mode);
 FILE *rtcache_fopen64(const char *path, const char *mode);
 int rtcache_close(int fd);
+int rtcache_close_range(unsigned int first, unsigned int last, int flags);
+void rtcache_closefrom(int lowfd);
 
 int execl_wrapper(const char *path, const char *arg0, ...);
 int execv_wrapper(const char *path, char *const argv[]);
