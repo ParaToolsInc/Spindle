@@ -368,6 +368,12 @@ int is_debug_fd(int fd)
    return (fd == debug_fd || fd == test_fd);
 }
 
+void get_debug_fds(int *log_fd, int *testlog_fd)
+{
+   *log_fd = debug_fd;
+   *testlog_fd = test_fd;
+}
+
 int spindle_debug_printf_impl(int priority, const char *file, unsigned int line, const char *func, const char *format, ...)
 {
    va_list ap;
