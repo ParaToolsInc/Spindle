@@ -63,7 +63,7 @@ void patch_on_linkactivity(struct link_map *lmap)
          strcpy(lmap->l_name, last_orig_name);
       }
       else {
-         malloc_sig_t app_malloc = get_libc_malloc();
+         malloc_sig_t app_malloc = get_app_malloc();
          if (app_malloc) {
             len = strlen(last_orig_name) + 2;
             oname = (char *) app_malloc(len);
