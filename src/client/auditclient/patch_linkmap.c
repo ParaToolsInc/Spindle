@@ -72,6 +72,11 @@ void patch_on_linkactivity(struct link_map *lmap)
                lmap->l_name = oname;
             }
          }
+         else {
+            /* Before LA_ACT_CONSISTENT, the application's malloc isn't available.
+             * Allocate in Spindle's heap instead. */
+            lmap->l_name = spindle_strdup(last_orig_name);
+         }
       }
    }
    else {
