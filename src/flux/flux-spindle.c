@@ -581,16 +581,22 @@ static int sp_init (flux_plugin_t *p,
      *  it into the shell so we get spindle debugging for this session.
      */
     if ((debug = flux_shell_getenv (shell, "SPINDLE_DEBUG")))
-        setenv ("SPINDLE_DEBUG", debug, 1);
+       setenv ("SPINDLE_DEBUG", debug, 1);
+    else
+       unsetenv("SPINDLE_DEBUG");
 
     /*  The spindle testsuite requires SPINDLE_TEST
      */
     if ((test = flux_shell_getenv (shell, "SPINDLE_TEST")))
        setenv ("SPINDLE_TEST", test, 1);
-
+    else
+       unsetenv("SPINDLE_TEST");
+    
     /*  Pass through SPINDLE_NO_CRASH_DEDUP for crash handling disabling */
     if ((crash_log = flux_shell_getenv(shell, "SPINDLE_NO_CRASH_DEDUP")))
        setenv("SPINDLE_NO_CRASH_DEDUP", crash_log, 1);    
+    else
+       unsetenv("SPINDLE_NO_CRASH_DEDUP");
 
     debug_printf(1, "initializing spindle flux plugin\n");
 
@@ -609,6 +615,8 @@ static int sp_init (flux_plugin_t *p,
     spindle_enabled = flux_shell_getenv (shell, "SPINDLE");
     if (spindle_enabled)
        setenv("SPINDLE", spindle_enabled, 1);
+    else
+       unsetenv("SPINDLE");
 
     /*  Get the jobid, R, and shell rank
      */
@@ -646,8 +654,8 @@ static int sp_init (flux_plugin_t *p,
 
     /*  Fill in the spindle_args_t with defaults from Spindle.
      *  We use fillInSpindleArgsCmdlineFE() here so that spindle does
-     *   not overwrite our already-initialized `number`, which must be
-     *   shared across the session.
+     *  not overwrite our already-initialized `number`, which must be
+     *  shared across the session.
      */
     if (fillInSpindleArgsCmdlineFE (&ctx->params,
                                     ctx->flags,
