@@ -22,6 +22,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include "ldcs_api.h"
 
 int ldcs_cobo_read_fd(int fd, void* buf, int size);
+int ldcs_cobo_read_fd_timeout(int fd, void* buf, int size, int timeout_ms);
 int ldcs_cobo_write_fd(int fd, void* buf, int size);
 int ll_write(int fd, void *buf, size_t count);
 int ll_send_nosignal(int fd, void *buf, size_t count);

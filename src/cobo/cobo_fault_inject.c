@@ -26,15 +26,7 @@ Place, Suite 330, Boston, MA 02111-1307 USA
 #include <unistd.h>
 #include <errno.h>
 #include <poll.h>
-#include <time.h>
 #include "cobo_fault_inject.h"
-
-static long long now_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
 
 static int list_contains(const char *list, const char *item)
 {
@@ -54,14 +46,14 @@ static int list_contains(const char *list, const char *item)
 static void stall(void)
 {
     const char *secs_s = getenv("SPINDLE_TEST_BE_STALL_SECS");
-    long long deadline = now_ms() + 1000LL * (secs_s ? atoi(secs_s) : 300);
+    long long deadline = cobo_now_ms() + 1000LL * (secs_s ? atoi(secs_s) : 300);
     struct pollfd pfd;
     int parent_fd = -1;
     cobo_get_parent_socket(&parent_fd);
     pfd.fd = parent_fd;
     pfd.events = POLLRDHUP;
     for (;;) {
-        long long remaining = deadline - now_ms();
+        long long remaining = deadline - cobo_now_ms();
         if (remaining <= 0)
             return;
         pfd.revents = 0;
