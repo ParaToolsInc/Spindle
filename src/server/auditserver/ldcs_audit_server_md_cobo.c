@@ -270,23 +270,12 @@ int ldcs_audit_server_md_trash_bytes(node_peer_t peer, size_t size)
 int ldcs_audit_server_md_recv_from_parent(ldcs_message_t *msg)
 {
    int fd = -1;
-   int timeout_ms = cobo_get_startup_timeout_ms();
 
    if (cobo_get_parent_socket(&fd) != COBO_SUCCESS)
       return -1;
-   if (ldcs_cobo_read_fd_timeout(fd, msg, sizeof(*msg), timeout_ms) < 0) {
+   if (read_msg_timeout(fd, msg, cobo_get_startup_timeout_ms()) == -1) {
       err_printf("No message from parent within the startup time limit\n");
       return -1;
-   }
-   msg->data = NULL;
-   if (msg->header.len) {
-      msg->data = (char *) malloc(msg->header.len);
-      if (ldcs_cobo_read_fd_timeout(fd, msg->data, msg->header.len, timeout_ms) < 0) {
-         err_printf("Incomplete message from parent within the startup time limit\n");
-         free(msg->data);
-         msg->data = NULL;
-         return -1;
-      }
    }
    return 0;
 }

@@ -413,9 +413,14 @@ int spindleInitFE(const char **hosts, spindle_args_t *params)
                 params->bundle_cachesize_kb, params->crash_log);
    printSpindleFlags(params->opts);
    debug_printf("Starting FE servers with hostlist of size %u on port %u\n", hosts_size, params->port);
-   ldcs_audit_server_fe_md_open(const_cast<char **>(hosts), hosts_size, 
-                                params->port, params->num_ports, params->unique_id,
-                                &md_data_ptr);
+   if (ldcs_audit_server_fe_md_open(const_cast<char **>(hosts), hosts_size,
+                                    params->port, params->num_ports, params->unique_id,
+                                    &md_data_ptr) == -1) {
+      err_printf("Could not start the Spindle server tree\n");
+      if (preload_msg)
+         cleanPreloadMsg(preload_msg);
+      return -1;
+   }
 
    /* Broadcast parameters */
    debug_printf("Sending parameters to servers\n");
@@ -426,20 +431,33 @@ int spindleInitFE(const char **hosts, spindle_args_t *params)
    msg.header.type = LDCS_MSG_SETTINGS;
    msg.header.len = param_buffer_size;
    msg.data = static_cast<char *>(param_buffer);
-   ldcs_audit_server_fe_broadcast(&msg, md_data_ptr);
+   int result = ldcs_audit_server_fe_broadcast(&msg, md_data_ptr);
    free(param_buffer);
+   if (result == -1) {
+      err_printf("Could not send settings to Spindle servers\n");
+      if (preload_msg)
+         cleanPreloadMsg(preload_msg);
+      return -1;
+   }
 
    /* Broadcast preload contents */
    if (preload_msg) {
       debug_printf("Sending message with preload information\n");
-      ldcs_audit_server_fe_broadcast(preload_msg, md_data_ptr);
+      result = ldcs_audit_server_fe_broadcast(preload_msg, md_data_ptr);
       cleanPreloadMsg(preload_msg);
+      if (result == -1) {
+         err_printf("Could not send preload list to Spindle servers\n");
+         return -1;
+      }
    }
 
    /* Wait for servers to indicate startup */
-   sendAndWaitForAlive();
+   if (!sendAndWaitForAlive()) {
+      err_printf("Spindle servers did not report ready\n");
+      return -1;
+   }
 
-   return 0;   
+   return 0;
 }
 
 int spindleWaitForCloseFE(spindle_args_t *params)

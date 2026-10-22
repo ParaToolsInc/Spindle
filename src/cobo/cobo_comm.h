@@ -32,5 +32,6 @@ int ll_send_nosignal(int fd, void *buf, size_t count);
 int ll_read(int fd, void *buf, size_t count);
 int write_msg(int fd, ldcs_message_t *msg);
 int write_msg_nosignal(int fd, ldcs_message_t *msg);
+int read_msg_timeout(int fd, ldcs_message_t *msg, int timeout_ms);
 
 #endif /* _COBO_COMM_H */

@@ -197,3 +197,19 @@ int write_msg_nosignal(int fd, ldcs_message_t *msg)
 
    return 0;
 }
+
+int read_msg_timeout(int fd, ldcs_message_t *msg, int timeout_ms)
+{
+   if (ldcs_cobo_read_fd_timeout(fd, msg, sizeof(*msg), timeout_ms) < 0)
+      return -1;
+   msg->data = NULL;
+   if (msg->header.len) {
+      msg->data = (char *) malloc(msg->header.len);
+      if (ldcs_cobo_read_fd_timeout(fd, msg->data, msg->header.len, timeout_ms) < 0) {
+         free(msg->data);
+         msg->data = NULL;
+         return -1;
+      }
+   }
+   return 0;
+}
