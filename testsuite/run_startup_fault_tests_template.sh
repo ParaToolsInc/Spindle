@@ -120,11 +120,29 @@ count_bootstraps() {
    pgrep -c -f "[s]pindle_bootstrap" || true
 }
 
-# Create FIFOs for a client that never connects
+# Count Spindle server processes
+count_servers() {
+   pgrep -c -x spindle_be || true
+}
+
+# True if the session is still published and has a server on every node.
+# A job run after the session has gone falls back to a non-session launch
+# and succeeds.
+session_alive() {
+   local n
+   flux kvs namespace list | grep -qw spindle || return 1
+   n=$(on_all_nodes "$(declare -f count_servers); count_servers" | sum_lines)
+   [ "$n" -eq "$NODES" ]
+}
+
+# Create FIFOs for a client that never connects: make_stale_fifos PID SUFFIX...
 make_stale_fifos() {
-   local d
+   local d pid=$1 s
+   shift
    find "${TMPDIR:-/tmp}" -maxdepth 4 -type d -name spindle_comm 2>/dev/null |
-      while read -r d; do mkfifo "$d/fifo-999999-0" "$d/fifo-999999-1"; done
+      while read -r d; do
+         for s in "$@"; do mkfifo "$d/fifo-$pid-$s"; done
+      done
 }
 
 # Sum the numbers read one per line; other lines (launcher noise) are ignored
@@ -207,20 +225,46 @@ session_exit_host_early() {
    fi
 }
 
-# A client that died mid-connect must not block the session's servers
+# A client that died mid-connect must not block the session's servers:
+# session_stale_fifo NAME PID SUFFIX...
 session_stale_fifo() {
-   local name=session-stale-fifo out rc sid
+   local name=$1 out rc sid alive
+   shift
    out="$SCRATCH/$name.log"
    sid=$("$SPINDLE" --start-session 2>"$SCRATCH/$name-start.log") || {
       fail "$name: could not start session"; return; }
-   on_all_nodes "$(declare -f make_stale_fifos); make_stale_fifos" >/dev/null 2>&1
+   on_all_nodes "$(declare -f make_stale_fifos); make_stale_fifos $*" >/dev/null 2>&1
    timeout -k 10 "$BOUND" "${CMD[@]}" >"$out" 2>&1
    rc=$?
+   session_alive; alive=$?
    "$SPINDLE" "--end-session${sid:+=$sid}" >/dev/null 2>&1
-   if [ $rc -eq 0 ]; then
-      pass "$name"
-   else
+   if [ $rc -ne 0 ]; then
       fail "$name: rc=$rc (log $out)"
+   elif [ $alive -ne 0 ]; then
+      fail "$name: session servers did not survive (log $out)"
+   else
+      pass "$name"
+   fi
+}
+
+# A session left idle past every startup wait must still run a job
+session_idle() {
+   local name=session-idle out rc sid alive
+   local idle=$(( (TIMELIMIT > CLIENT_WAIT ? TIMELIMIT : CLIENT_WAIT) + 10 ))
+   out="$SCRATCH/$name.log"
+   sid=$(COBO_CONNECT_TIMELIMIT="$TIMELIMIT" "$SPINDLE" --start-session 2>"$SCRATCH/$name-start.log") || {
+      fail "$name: could not start session"; return; }
+   sleep "$idle"
+   timeout -k 10 "$BOUND" "${CMD[@]}" >"$out" 2>&1
+   rc=$?
+   session_alive; alive=$?
+   "$SPINDLE" "--end-session${sid:+=$sid}" >/dev/null 2>&1
+   if [ $rc -ne 0 ]; then
+      fail "$name: rc=$rc after ${idle}s idle (log $out)"
+   elif [ $alive -ne 0 ]; then
+      fail "$name: session servers did not survive ${idle}s idle (log $out)"
+   else
+      pass "$name (idle ${idle}s)"
    fi
 }
 
@@ -235,7 +279,9 @@ cd "$TESTDIR" || die "can't cd to $TESTDIR"
 
 if (( SESSION )); then
    selected session-exit-host-early && session_exit_host_early
-   selected session-stale-fifo && session_stale_fifo
+   selected session-stale-fifo && session_stale_fifo session-stale-fifo 999999 0 1
+   selected session-stale-fifo1 && session_stale_fifo session-stale-fifo1 999998 1
+   selected session-idle && session_idle
 else
    for entry in "${CASES_TABLE[@]}"; do
       IFS=';' read -r name envs expect <<< "$entry"
