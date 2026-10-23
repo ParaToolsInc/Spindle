@@ -125,12 +125,17 @@ count_servers() {
    pgrep -c -x spindle_be || true
 }
 
+# True if a Spindle session is published in the Flux KVS
+session_published() {
+   flux kvs namespace list | grep -qw spindle
+}
+
 # True if the session is still published and has a server on every node.
 # A job run after the session has gone falls back to a non-session launch
 # and succeeds.
 session_alive() {
    local n
-   flux kvs namespace list | grep -qw spindle || return 1
+   session_published || return 1
    n=$(on_all_nodes "$(declare -f count_servers); count_servers" | sum_lines)
    [ "$n" -eq "$NODES" ]
 }
@@ -227,6 +232,8 @@ session_exit_host_early() {
       sid=$(head -n 1 "$out")
       end_session "$sid"
       fail "$name: --start-session reported success (log $out.err)"
+   elif session_published; then
+      fail "$name: failed session left published in the Flux KVS"
    else
       check_leftovers "$name" && pass "$name (rc=$rc)"
    fi
