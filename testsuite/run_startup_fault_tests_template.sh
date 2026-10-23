@@ -135,6 +135,13 @@ session_alive() {
    [ "$n" -eq "$NODES" ]
 }
 
+# End a session.  Flux removes the session's KVS namespace asynchronously
+# (about 1s), and a session started before then can't publish its settings.
+end_session() {
+   "$SPINDLE" "--end-session${1:+=$1}" >/dev/null 2>&1
+   sleep 3
+}
+
 # Create FIFOs for a client that never connects: make_stale_fifos PID SUFFIX...
 make_stale_fifos() {
    local d pid=$1 s
@@ -218,7 +225,7 @@ session_exit_host_early() {
       fail "$name: --start-session hung (log $out.err)"
    elif [ $rc -eq 0 ]; then
       sid=$(head -n 1 "$out")
-      "$SPINDLE" "--end-session${sid:+=$sid}" >/dev/null 2>&1
+      end_session "$sid"
       fail "$name: --start-session reported success (log $out.err)"
    else
       check_leftovers "$name" && pass "$name (rc=$rc)"
@@ -237,7 +244,7 @@ session_stale_fifo() {
    timeout -k 10 "$BOUND" "${CMD[@]}" >"$out" 2>&1
    rc=$?
    session_alive; alive=$?
-   "$SPINDLE" "--end-session${sid:+=$sid}" >/dev/null 2>&1
+   end_session "$sid"
    if [ $rc -ne 0 ]; then
       fail "$name: rc=$rc (log $out)"
    elif [ $alive -ne 0 ]; then
@@ -258,7 +265,7 @@ session_idle() {
    timeout -k 10 "$BOUND" "${CMD[@]}" >"$out" 2>&1
    rc=$?
    session_alive; alive=$?
-   "$SPINDLE" "--end-session${sid:+=$sid}" >/dev/null 2>&1
+   end_session "$sid"
    if [ $rc -ne 0 ]; then
       fail "$name: rc=$rc after ${idle}s idle (log $out)"
    elif [ $alive -ne 0 ]; then
