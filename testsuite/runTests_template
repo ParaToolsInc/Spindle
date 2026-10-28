@@ -4,7 +4,7 @@ export SPINDLE_TEST_ARGS="$@"
 export SPINDLE_BLUEGENE="BLUEGENE_TEST"
 export TEST_RM="TEST_RESOURCE_MANAGER"
 export GLOBAL_RESULT=0
-CHECK_RETCODE() { if [[ $? != 0 ]]; then export GLOBAL_RESULT=-1; fi }
+CHECK_RETCODE() { local rc=$?; if [[ $rc != 0 ]]; then echo "TEST FAILED (rc=$rc)"; export GLOBAL_RESULT=-1; fi }
 
 # For slurm-plugin, whether we use a session is determined by the allocation we run in.
 # Run only the non-session tests if this allocation doesn't use a session.
